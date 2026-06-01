@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BTC Simulator</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">BTC Simulator</p>
+        <h1 id="nodeName">节点控制台</h1>
+      </div>
+      <div class="top-actions">
+        <button class="ghost-btn" id="refreshBtn" type="button">刷新状态</button>
+        <button class="primary-btn" id="syncTopBtn" type="button">同步区块</button>
+      </div>
+    </header>
+
+    <section class="status-strip" aria-label="节点状态">
+      <div class="metric">
+        <span>余额</span>
+        <strong id="balance">0 BTC</strong>
+        <small id="availableBalance">可用 0 BTC</small>
+      </div>
+      <div class="metric">
+        <span>区块高度</span>
+        <strong id="height">0</strong>
+        <small id="tipHash">00000000</small>
+      </div>
+      <div class="metric">
+        <span>连接</span>
+        <strong id="peerCount">0 / 0</strong>
+        <small id="peerDetail">入站 0，出站 0</small>
+      </div>
+      <div class="metric">
+        <span>挖矿</span>
+        <strong id="miningStatus">未挖矿</strong>
+        <small id="difficulty">难度 0</small>
+      </div>
+      <div class="metric">
+        <span>内存池</span>
+        <strong id="mempoolCount">0 笔</strong>
+        <small id="mempoolBytes">0 B</small>
+      </div>
+      <div class="metric">
+        <span>版本</span>
+        <strong id="version">v0.1.0</strong>
+        <small id="lastBlockTime">--</small>
+      </div>
+    </section>
+
+    <nav class="tabs" aria-label="页面">
+      <button class="tab active" data-tab="mining" type="button">挖矿</button>
+      <button class="tab" data-tab="send" type="button">发送</button>
+      <button class="tab" data-tab="receive" type="button">接收</button>
+      <button class="tab" data-tab="nodes" type="button">节点</button>
+      <button class="tab" data-tab="explorer" type="button">浏览器</button>
+      <button class="tab" data-tab="join" type="button">入网</button>
+      <button class="tab" data-tab="lab" type="button">实验</button>
+      <button class="tab" data-tab="classroom" type="button">教师</button>
+    </nav>
+
+    <main>
+      <section class="tab-panel active" id="tab-mining">
+        <div class="work-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>挖矿状态</h2>
+              <div class="button-row">
+                <button class="primary-btn" id="startMiningBtn" type="button">开始挖矿</button>
+                <button class="danger-btn" id="stopMiningBtn" type="button">暂停挖矿</button>
+              </div>
+            </div>
+            <div class="mining-summary">
+              <div>
+                <span>状态</span>
+                <strong class="status-badge idle" id="miningBadge">未挖矿</strong>
+              </div>
+              <p id="miningHint">点击开始挖矿后，节点会在后台生成候选区块并刷新 nonce。</p>
+            </div>
+            <div class="mining-detail-grid">
+              <div class="detail-cell">
+                <span id="nonceLabel">当前 Nonce</span>
+                <output id="nonce">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>当前难度</span>
+                <output id="miningDifficulty">0</output>
+              </div>
+              <div class="detail-cell span-2">
+                <span id="hashLabel">候选 Hash</span>
+                <output class="mono hash-output" id="currentHash">--</output>
+              </div>
+              <div class="detail-cell span-2">
+                <span>链头 Hash</span>
+                <output class="mono hash-output" id="tipHashFull">--</output>
+              </div>
+              <div class="detail-cell span-2">
+                <span>矿工地址</span>
+                <output class="mono hash-output" id="walletAddressShort">--</output>
+              </div>
+            </div>
+            <div class="chain-tools admin-only" id="adminChainTools" hidden>
+              <form class="difficulty-form" id="difficultyForm">
+                <label>
+                  <span>初始难度</span>
+                  <input id="difficultyInput" type="number" min="0" max="12" step="1" value="5">
+                </label>
+                <button class="primary-btn" type="submit">保存难度</button>
+              </form>
+              <div class="danger-zone">
+                <div>
+                  <strong>重置区块链</strong>
+                  <span>保留钱包和节点记录，清空区块、交易和内存池，只留下创世块。</span>
+                </div>
+                <button class="danger-btn" id="resetChainBtn" type="button">重置到创世块</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>最近日志</h2>
+              <button class="ghost-btn" id="refreshLogsBtn" type="button">刷新</button>
+            </div>
+            <div class="log-list" id="logs"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-send">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>发送交易</h2>
+            <button class="ghost-btn" id="autoFeeBtn" type="button">自动手续费</button>
+          </div>
+          <form class="form-grid" id="sendForm">
+            <label class="wide">
+              <span>接收方地址</span>
+              <input id="receiverInput" name="receiver" autocomplete="off" required>
+            </label>
+            <label>
+              <span>到账数量</span>
+              <input id="amountInput" name="amount" type="number" min="0" step="0.00000001" required>
+            </label>
+            <label>
+              <span>手续费</span>
+              <input id="feeInput" name="fee" type="number" min="0" step="0.00000001" value="0.01" required>
+            </label>
+            <label>
+              <span>到账确认块数</span>
+              <input id="confirmationsInput" name="confirmations" type="number" min="1" step="1" value="10">
+            </label>
+            <label class="wide">
+              <span>备注</span>
+              <input id="noteInput" name="note" autocomplete="off">
+            </label>
+            <div class="form-actions wide">
+              <button class="primary-btn" type="submit">发送</button>
+              <button class="ghost-btn" id="clearSendBtn" type="button">清空</button>
+            </div>
+          </form>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="tab-receive">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>接收地址</h2>
+            <div class="button-row">
+              <button class="ghost-btn" id="copyAddressBtn" type="button">复制地址</button>
+              <button class="primary-btn" id="generateAddressBtn" type="button">生成地址</button>
+            </div>
+          </div>
+          <div class="address-box">
+            <span>默认地址</span>
+            <code id="walletAddress">--</code>
+          </div>
+          <div class="receive-grid">
+            <label>
+              <span>名字</span>
+              <output id="walletName">default</output>
+            </label>
+            <label>
+              <span>当前余额</span>
+              <output id="receiveBalance">0 BTC</output>
+            </label>
+            <label>
+              <span>连接状态</span>
+              <output id="receivePeers">0 个节点</output>
+            </label>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="tab-nodes">
+        <div class="work-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>添加节点</h2>
+              <button class="primary-btn" id="syncNodesBtn" type="button">同步区块</button>
+            </div>
+            <form class="peer-form" id="peerForm">
+              <label>
+                <span>IP</span>
+                <input id="peerIpInput" value="127.0.0.1" required>
+              </label>
+              <label>
+                <span>Port</span>
+                <input id="peerPortInput" type="number" min="1" max="65535" value="7465" required>
+              </label>
+              <button class="primary-btn" type="submit">连接节点</button>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>节点列表</h2>
+              <button class="ghost-btn" id="refreshPeersBtn" type="button">刷新节点</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>序号</th>
+                    <th>IP</th>
+                    <th>Port</th>
+                    <th>名字</th>
+                    <th>地址</th>
+                    <th>状态</th>
+                    <th>方向</th>
+                    <th>最后通信</th>
+                  </tr>
+                </thead>
+                <tbody id="peersTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-explorer">
+        <div class="explorer-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>区块列表</h2>
+              <div class="button-row">
+                <button class="ghost-btn" id="prevBlocksBtn" type="button">上一页</button>
+                <button class="ghost-btn" id="nextBlocksBtn" type="button">下一页</button>
+                <button class="primary-btn" id="refreshBlocksBtn" type="button">刷新</button>
+              </div>
+            </div>
+            <div class="block-search">
+              <input id="blockSearchInput" placeholder="输入区块高度或 hash">
+              <button class="ghost-btn" id="blockSearchBtn" type="button">查询</button>
+            </div>
+            <div class="table-wrap block-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>高度</th>
+                    <th>Hash</th>
+                    <th>交易</th>
+                    <th>难度</th>
+                    <th>Nonce</th>
+                    <th>时间</th>
+                  </tr>
+                </thead>
+                <tbody id="blocksTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>区块详情</h2>
+              <span class="detail-chip" id="blockDetailTitle">未选择</span>
+            </div>
+            <div class="block-detail-grid">
+              <div class="detail-cell span-2">
+                <span>Hash</span>
+                <output class="mono hash-output" id="detailHash">--</output>
+              </div>
+              <div class="detail-cell span-2">
+                <span>Prev Hash</span>
+                <output class="mono hash-output" id="detailPrevHash">--</output>
+              </div>
+              <div class="detail-cell span-2">
+                <span>Merkle Root</span>
+                <output class="mono hash-output" id="detailMerkle">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>时间</span>
+                <output id="detailTime">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>交易数</span>
+                <output id="detailTxCount">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>难度</span>
+                <output id="detailDifficulty">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>Nonce</span>
+                <output id="detailNonce">--</output>
+              </div>
+            </div>
+            <h3 class="subhead">区块交易</h3>
+            <div class="table-wrap tx-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>类型</th>
+                    <th>Tx ID</th>
+                    <th>发送方</th>
+                    <th>接收方</th>
+                    <th>数量</th>
+                    <th>手续费</th>
+                  </tr>
+                </thead>
+                <tbody id="blockTxTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-join">
+        <div class="join-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>本节点入网信息</h2>
+              <button class="ghost-btn" id="copyJoinBundleBtn" type="button">复制全部</button>
+            </div>
+            <div class="info-grid">
+              <div class="detail-cell span-2">
+                <span>Web 控制台</span>
+                <output class="mono hash-output" id="joinWebUrl">--</output>
+              </div>
+              <div class="detail-cell span-2">
+                <span>P2P 地址</span>
+                <output class="mono hash-output" id="joinP2pAddress">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>Network ID</span>
+                <output class="mono" id="joinNetworkId">--</output>
+              </div>
+              <div class="detail-cell">
+                <span>参数 Hash</span>
+                <output class="mono" id="joinParamsHash">--</output>
+              </div>
+            </div>
+            <div class="button-row join-actions">
+              <button class="primary-btn" id="copyP2pBtn" type="button">复制 P2P 地址</button>
+              <button class="ghost-btn" id="copyWebBtn" type="button">复制 Web 地址</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>入网码</h2>
+              <span class="detail-chip">P2P</span>
+            </div>
+            <div class="qr-box">
+              <canvas id="joinQr" width="164" height="164" aria-label="P2P 入网码"></canvas>
+              <code id="joinQrText">--</code>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-lab">
+        <div class="lab-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>课堂实验</h2>
+              <button class="ghost-btn" id="refreshLabBtn" type="button">刷新进度</button>
+            </div>
+            <div class="lab-list" id="labList"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>观察点</h2>
+            </div>
+            <div class="observation-list">
+              <div>
+                <strong>交易进入内存池</strong>
+                <span>发送交易后先观察内存池数量，再挖矿打包。</span>
+              </div>
+              <div>
+                <strong>区块广播</strong>
+                <span>某个节点挖到块后，其他节点高度应逐步同步。</span>
+              </div>
+              <div>
+                <strong>参数一致性</strong>
+                <span>教师页出现参数不匹配时，该节点不会接受课堂链。</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-classroom">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>教师总览</h2>
+            <div class="button-row">
+              <button class="ghost-btn" id="refreshClassroomBtn" type="button">刷新课堂</button>
+              <button class="primary-btn" id="syncClassroomBtn" type="button">同步区块</button>
+            </div>
+          </div>
+          <div class="teacher-strip">
+            <div class="metric compact">
+              <span>节点数</span>
+              <strong id="teacherNodeCount">0</strong>
+            </div>
+            <div class="metric compact">
+              <span>最高高度</span>
+              <strong id="teacherMaxHeight">0</strong>
+            </div>
+            <div class="metric compact">
+              <span>正在挖矿</span>
+              <strong id="teacherMiningCount">0</strong>
+            </div>
+            <div class="metric compact">
+              <span>参数异常</span>
+              <strong id="teacherMismatchCount">0</strong>
+            </div>
+          </div>
+          <div class="classroom-alert" id="classroomAlert" hidden></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>节点</th>
+                  <th>IP:Port</th>
+                  <th>高度</th>
+                  <th>难度</th>
+                  <th>挖矿</th>
+                  <th>状态</th>
+                  <th>参数 Hash</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody id="classroomTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

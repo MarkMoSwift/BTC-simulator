@@ -1,0 +1,1 @@
+"""Core blockchain simulation logic."""

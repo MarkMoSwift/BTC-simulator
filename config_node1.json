@@ -1,0 +1,30 @@
+{
+  "version": "0.1.0",
+  "network_id": "btc-sim-classroom",
+  "node_name": "server1",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 7464,
+  "web_host": "127.0.0.1",
+  "web_port": 8000,
+  "difficulty": 5,
+  "auto_difficulty": true,
+  "target_block_seconds": 60,
+  "difficulty_adjustment_interval": 10,
+  "difficulty_adjustment_tolerance": 0.25,
+  "difficulty_max_step": 1,
+  "min_difficulty": 0,
+  "max_difficulty": 12,
+  "mining_reward": 50.0,
+  "max_block_transactions": 100,
+  "mempool_max_bytes": 314572800,
+  "sync_interval_seconds": 10,
+  "servers": [
+    ["127.0.0.1", 7464],
+    ["127.0.0.1", 7465],
+    ["127.0.0.1", 7466]
+  ],
+  "storage": {
+    "type": "sqlite",
+    "path": "./data/node1.db"
+  }
+}
