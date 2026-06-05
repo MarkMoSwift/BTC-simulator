@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--advertise-ip", default=None, help="IPv4 address shared with other nodes")
     parser.add_argument("--advertise-ipv6", default=None, help="IPv6 address shared with other nodes")
     parser.add_argument("--listen-port", type=int, default=7464, help="P2P port")
-    parser.add_argument("--web-host", default="0.0.0.0", help="Web console bind address")
+    parser.add_argument("--web-host", default="127.0.0.1", help="Web console bind address")
     parser.add_argument("--web-port", type=int, default=8000, help="Web console port")
     parser.add_argument("--storage", default=None, help="SQLite database path")
     parser.add_argument(

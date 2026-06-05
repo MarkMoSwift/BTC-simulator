@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any
 
 from app.utils.serialization import canonical_json_bytes
@@ -9,14 +10,16 @@ from app.utils.serialization import canonical_json_bytes
 def sha256_hex(data: bytes | str) -> str:
     if isinstance(data, str):
         data = data.encode("utf-8")
-    return hashlib.sha256(data).hexdigest()
+    result = hashlib.sha256(data).hexdigest()
+    return result
 
 
 def double_sha256_hex(data: bytes | str) -> str:
     if isinstance(data, str):
         data = data.encode("utf-8")
     first = hashlib.sha256(data).digest()
-    return hashlib.sha256(first).hexdigest()
+    result = hashlib.sha256(first).hexdigest()
+    return result
 
 
 def hash_json(data: Any) -> str:

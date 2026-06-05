@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from scripts.init_node import build_config, parse_peer, sanitize_name
+from scripts.init_node import build_config, parse_args, parse_peer, sanitize_name
 
 
 def test_parse_peer_accepts_host_port():
@@ -41,6 +41,14 @@ def test_build_config_for_lan_node():
     assert config["web_host"] == "0.0.0.0"
     assert config["servers"] == [["192.168.1.10", 7464]]
     assert config["storage"]["path"] == "./data/Alice-Node.db"
+
+
+def test_parse_args_defaults_web_console_to_loopback(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["init_node.py", "--no-prompt"])
+
+    args = parse_args()
+
+    assert args.web_host == "127.0.0.1"
 
 
 def test_sanitize_name_has_fallback():

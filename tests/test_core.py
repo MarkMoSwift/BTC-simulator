@@ -12,7 +12,6 @@ from app.core.block import (
     difficulty_to_target,
     hash_meets_difficulty,
     hash_meets_target,
-    target_prefix_to_hex,
 )
 from app.core.blockchain import Blockchain
 from app.core.mempool import Mempool
@@ -25,7 +24,6 @@ from app.storage.sqlite_store import SQLiteStore
 def make_stack(tmp_path: Path):
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["difficulty"] = 1
-    config["initial_target_prefix"] = None
     config["storage"]["path"] = str(tmp_path / "chain.db")
     store = SQLiteStore(config["storage"]["path"])
     chain = Blockchain(config, store)
@@ -77,12 +75,13 @@ def test_wallet_signature_and_tx_id(tmp_path: Path):
         raise AssertionError("tampered transaction should be rejected")
 
 
-def test_hex_target_prefix_supports_fine_grained_work():
-    target = target_prefix_to_hex("000b")
+def test_binary_difficulty_target_uses_bit_counts():
+    target = difficulty_to_target(5)
 
-    assert target.startswith("000b")
-    assert hash_meets_target("000a" + ("f" * 60), target)
-    assert not hash_meets_target("000c" + ("0" * 60), target)
+    assert target.startswith("07")
+    assert hash_meets_target("07" + ("f" * 62), target)
+    assert hash_meets_difficulty("07" + ("f" * 62), 5)
+    assert not hash_meets_difficulty("08" + ("0" * 62), 5)
 
 
 def test_mining_reward_and_balance(tmp_path: Path):
@@ -244,7 +243,7 @@ def test_auto_difficulty_increases_when_blocks_are_fast(tmp_path: Path):
     candidate = chain.create_candidate_block(miner.address, [])
     assert int(expected_target, 16) < int(previous_target, 16)
     assert candidate["header"]["target"] == expected_target
-    assert candidate["header"]["difficulty"] == 1
+    assert candidate["header"]["difficulty"] == 2
     store.close()
 
 
@@ -268,11 +267,10 @@ def test_auto_difficulty_decreases_when_blocks_are_slow(tmp_path: Path):
     store.close()
 
 
-def test_adaptive_target_accelerates_after_repeated_fast_windows(tmp_path: Path):
+def test_auto_difficulty_keeps_one_bit_steps_after_repeated_fast_windows(tmp_path: Path):
     config, store, chain, _mempool = make_stack(tmp_path)
     config["difficulty_adjustment_interval"] = 3
     config["target_block_seconds"] = 60
-    config["target_adjustment_base_bps"] = 1000
     miner = generate_wallet("miner")
     store.save_wallet(miner)
     start = int(time.time()) - 600
@@ -280,18 +278,16 @@ def test_adaptive_target_accelerates_after_repeated_fast_windows(tmp_path: Path)
     for offset in range(3):
         block, _block_hash = mine_block(chain, miner.address, timestamp=start + offset)
         assert chain.add_block(block, source="test")[0]
-    base_target = int(store.get_block_by_height(3)["target"], 16)
-    first_target = int(chain.expected_target(4), 16)
+    assert chain.expected_difficulty(4) == 2
 
     for offset in range(3, 6):
         block, _block_hash = mine_block(chain, miner.address, timestamp=start + offset)
         assert chain.add_block(block, source="test")[0]
-    second_target = int(chain.expected_target(7), 16)
     policy = chain.difficulty_policy()
 
-    assert base_target - first_target < first_target - second_target
-    assert policy["momentum_streak"] == 2
-    assert policy["momentum_adjustment_bps"] == 2000
+    assert chain.expected_difficulty(7) == 3
+    assert policy["adjustment_step_bits"] == 1
+    assert policy["last_adjustment_direction"] == 1
     store.close()
 
 
@@ -507,7 +503,7 @@ def test_service_set_difficulty_persists_to_config(tmp_path: Path):
     asyncio.run(service.shutdown())
 
 
-def test_service_set_target_prefix_persists_to_config(tmp_path: Path):
+def test_service_set_difficulty_allows_binary_bit_range(tmp_path: Path):
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["storage"]["path"] = str(tmp_path / "node.db")
     config_path = tmp_path / "node.json"
@@ -516,11 +512,11 @@ def test_service_set_target_prefix_persists_to_config(tmp_path: Path):
     config["_config_dir"] = str(tmp_path)
 
     service = NodeService(config)
-    result = asyncio.run(service.set_target_prefix("000b"))
+    result = asyncio.run(service.set_difficulty(13))
 
-    assert result["target_prefix"] == "000b"
-    assert service.blockchain.expected_target().startswith("000b")
+    assert result["difficulty"] == 13
+    assert service.blockchain.expected_difficulty() == 13
     saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert saved["initial_target_prefix"] == "000b"
+    assert saved["difficulty"] == 13
 
     asyncio.run(service.shutdown())

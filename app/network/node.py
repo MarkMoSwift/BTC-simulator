@@ -14,6 +14,7 @@ from app.network.address import (
     is_loopback_or_unspecified,
     normalize_host,
 )
+from app.core.block import compute_block_hash
 from app.network.protocol import block_message_id, read_json, send_json, tx_message_id
 
 LogFn = Callable[[str], None]
@@ -272,13 +273,13 @@ class P2PNode:
         elif msg_type == "PEERS":
             await self._handle_peers(message)
         elif msg_type == "TX":
-            await self._handle_tx(message)
+            await self._handle_tx(conn, message)
         elif msg_type == "BLOCK":
-            await self._handle_block(message)
+            await self._handle_block(conn, message)
         elif msg_type == "GET_BLOCKS":
             await self._handle_get_blocks(conn, message)
         elif msg_type == "BLOCKS":
-            await self._handle_blocks(message)
+            await self._handle_blocks(conn, message)
         elif msg_type == "PING":
             await send_json(conn.writer, {"type": "PONG", "timestamp": int(time.time())})
         elif msg_type == "PONG":
@@ -304,11 +305,25 @@ class P2PNode:
         conn.target = str(message.get("target") or "") or None
         conn.mining_status = str(message.get("mining_status") or "")
         conn.web_port = int(message.get("web_port") or 0) or None
+        identity_conflict = self._identity_conflict_reason(conn)
+        if identity_conflict:
+            conn.mismatch_reason = identity_conflict
+            conn.final_status = "self connection"
+            self.log(f"Ignored peer {conn.name or conn.key}: {identity_conflict}")
+            conn.writer.close()
+            return
         if conn.listen_port != conn.port:
             self.service.store.delete_peer(conn.ip, conn.port)
         old_keys = [key for key, value in self.connections.items() if value is conn]
         for key in old_keys:
             self.connections.pop(key, None)
+        existing = self.connections.get(conn.key)
+        if existing is not None and existing is not conn:
+            conn.mismatch_reason = "peer address already connected"
+            conn.final_status = "duplicate peer address"
+            self.log(f"Ignored peer {conn.name or conn.key}: {conn.mismatch_reason}")
+            conn.writer.close()
+            return
         self.connections[conn.key] = conn
         mismatch = self._network_mismatch_reason(conn)
         if mismatch:
@@ -357,6 +372,16 @@ class P2PNode:
             )
         return None
 
+    def _identity_conflict_reason(self, conn: PeerConnection) -> str | None:
+        if conn.name and conn.name == self.config.get("node_name"):
+            return "same node name"
+        own_wallet = self.service.default_wallet()
+        if conn.address and conn.address == own_wallet["address"]:
+            return "same wallet address"
+        if self._is_self(conn.ip, int(conn.listen_port or conn.port)):
+            return "same listen address"
+        return None
+
     async def _handle_peers(self, message: dict[str, Any]) -> None:
         for peer in message.get("peers", []):
             ip = normalize_host(peer.get("ip", ""))
@@ -375,27 +400,77 @@ class P2PNode:
             if format_host_port(ip, port) not in self.connections:
                 self._track(asyncio.create_task(self.connect_peer(ip, port)))
 
-    async def _handle_tx(self, message: dict[str, Any]) -> None:
+    def _source_label(self, conn: PeerConnection) -> str:
+        return f"{conn.name or 'unknown'} {format_host_port(conn.ip, int(conn.listen_port or conn.port))}"
+
+    def _security_peer_fields(self, conn: PeerConnection) -> dict[str, Any]:
+        return {
+            "peer_name": conn.name,
+            "peer_ip": conn.ip,
+            "peer_port": int(conn.listen_port or conn.port),
+            "wallet_address": conn.address,
+        }
+
+    async def _handle_tx(self, conn: PeerConnection, message: dict[str, Any]) -> None:
         tx = message.get("tx")
         if not isinstance(tx, dict):
+            self.service.record_security_event(
+                "malformed transaction",
+                self._source_label(conn),
+                "TX message missing transaction object",
+                **self._security_peer_fields(conn),
+            )
             return
-        mid = message.get("message_id") or tx_message_id(tx)
+        mid = message.get("message_id") or (
+            tx_message_id(tx) if tx.get("tx_id") else f"TX:{id(tx)}"
+        )
         if mid in self.seen_message_ids:
             return
         self.seen_message_ids.add(mid)
-        accepted, _result = await self.service.receive_transaction(tx, source="peer")
+        source = self._source_label(conn)
+        accepted, result = await self.service.receive_transaction(tx, source=source)
+        if not accepted:
+            self.service.record_security_event(
+                "invalid transaction",
+                source,
+                result,
+                tx_id=tx.get("tx_id"),
+                wallet_address=tx.get("sender") or conn.address,
+                **{
+                    key: value
+                    for key, value in self._security_peer_fields(conn).items()
+                    if key != "wallet_address"
+                },
+            )
+            return
         if accepted and int(message.get("ttl", 0)) > 1:
             await self.broadcast_tx(tx, ttl=int(message["ttl"]) - 1, message_id=mid)
 
-    async def _handle_block(self, message: dict[str, Any]) -> None:
+    async def _handle_block(self, conn: PeerConnection, message: dict[str, Any]) -> None:
         block = message.get("block")
         if not isinstance(block, dict):
+            self.service.record_security_event(
+                "malformed block",
+                self._source_label(conn),
+                "BLOCK message missing block object",
+                **self._security_peer_fields(conn),
+            )
             return
         mid = message.get("message_id") or block_message_id(block)
         if mid in self.seen_message_ids:
             return
         self.seen_message_ids.add(mid)
-        accepted, _result = await self.service.receive_block(block, source="peer")
+        source = self._source_label(conn)
+        accepted, result = await self.service.receive_block(block, source=source)
+        if not accepted:
+            self.service.record_security_event(
+                "invalid block",
+                source,
+                result,
+                block_hash=compute_block_hash(block),
+                **self._security_peer_fields(conn),
+            )
+            return
         if accepted and int(message.get("ttl", 0)) > 1:
             await self.broadcast_block(block, ttl=int(message["ttl"]) - 1, message_id=mid)
 
@@ -404,12 +479,19 @@ class P2PNode:
         blocks = self.service.store.get_blocks_from_height(from_height)
         await send_json(conn.writer, {"type": "BLOCKS", "from_height": from_height, "blocks": blocks})
 
-    async def _handle_blocks(self, message: dict[str, Any]) -> None:
-        await self.service.receive_blocks(
+    async def _handle_blocks(self, conn: PeerConnection, message: dict[str, Any]) -> None:
+        accepted, result = await self.service.receive_blocks(
             message.get("blocks", []),
             from_height=int(message.get("from_height") or 0),
-            source="sync",
+            source=self._source_label(conn),
         )
+        if not accepted:
+            self.service.record_security_event(
+                "invalid chain sync",
+                self._source_label(conn),
+                result,
+                **self._security_peer_fields(conn),
+            )
 
     def known_peers(self) -> list[dict[str, Any]]:
         peers = self.service.store.list_peers()

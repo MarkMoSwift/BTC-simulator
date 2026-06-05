@@ -57,7 +57,7 @@ def genesis_block() -> dict[str, Any]:
 
 
 def hash_meets_difficulty(block_hash: str, difficulty: int) -> bool:
-    return block_hash.startswith("0" * max(int(difficulty), 0))
+    return hash_meets_target(block_hash, difficulty_to_target(difficulty))
 
 
 def normalize_target_hex(target: str | int) -> str:
@@ -78,27 +78,20 @@ def normalize_target_hex(target: str | int) -> str:
     return f"{value:064x}"
 
 
-def target_prefix_to_hex(prefix: str) -> str:
-    text = str(prefix).strip().lower()
-    if text.startswith("0x"):
-        text = text[2:]
-    if not text or len(text) > 64:
-        raise ValueError("target prefix must contain 1 to 64 hexadecimal characters")
-    try:
-        int(text, 16)
-    except ValueError as exc:
-        raise ValueError("target prefix must be hexadecimal") from exc
-    return normalize_target_hex(text + ("f" * (64 - len(text))))
-
-
 def difficulty_to_target(difficulty: int) -> str:
-    zeros = min(max(int(difficulty), 0), 64)
-    return ("0" * zeros) + ("f" * (64 - zeros))
+    bits = min(max(int(difficulty), 0), 256)
+    if bits == 0:
+        return MAX_TARGET_HEX
+    if bits == 256:
+        return "0" * 64
+    return normalize_target_hex((1 << (256 - bits)) - 1)
 
 
 def target_to_difficulty(target: str | int) -> int:
-    normalized = normalize_target_hex(target)
-    return len(normalized) - len(normalized.lstrip("0"))
+    value = int(normalize_target_hex(target), 16)
+    if value == 0:
+        return 256
+    return max(256 - value.bit_length(), 0)
 
 
 def target_preview(target: str | int, minimum_chars: int = 8) -> str:
@@ -108,12 +101,6 @@ def target_preview(target: str | int, minimum_chars: int = 8) -> str:
     if visible == 64:
         return normalized
     return f"{normalized[:visible]}..."
-
-
-def effective_target(header: dict[str, Any]) -> str:
-    if header.get("target") is not None:
-        return normalize_target_hex(header["target"])
-    return difficulty_to_target(int(header.get("difficulty", 0)))
 
 
 def hash_meets_target(block_hash: str, target: str | int) -> bool:

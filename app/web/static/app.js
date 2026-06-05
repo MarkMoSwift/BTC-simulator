@@ -27,19 +27,12 @@ function shortHash(value, size = 10) {
 }
 
 function targetPreview(value, difficulty = null) {
-  if (!value) return difficulty === null ? "--" : `前导 0 × ${difficulty}`;
+  if (!value) return difficulty === null ? "--" : `<= target (${difficulty} bit zero)`;
   const target = String(value).toLowerCase().replace(/^0x/, "");
-  const leadingZeros = (target.match(/^0*/) || [""])[0].length;
-  const visible = Math.min(Math.max(8, leadingZeros + 2), target.length);
-  return `≤ ${target.slice(0, visible)}${visible < target.length ? "..." : ""}`;
-}
-
-function momentumText(policy) {
-  const direction = Number(policy?.momentum_direction || 0);
-  const streak = Number(policy?.momentum_streak || 0);
-  const adjustment = Number(policy?.momentum_adjustment_bps || 0) / 100;
-  if (!direction || !streak) return "当前没有连续偏差加速";
-  return `连续${direction < 0 ? "偏快" : "偏慢"} ${streak} 个窗口，最近调节步长 ${adjustment}%`;
+  const valueBig = BigInt(`0x${target || "0"}`);
+  const leadingBits = valueBig === 0n ? 256 : Math.max(256 - valueBig.toString(2).length, 0);
+  const visible = Math.min(Math.max(8, Math.ceil(leadingBits / 4) + 3), target.length);
+  return `≤ ${target.slice(0, visible)}${visible < target.length ? "..." : ""} (${leadingBits} bit zero)`;
 }
 
 function formatHostPort(host, port) {
@@ -145,9 +138,6 @@ function renderStatus(status) {
   if ($("#difficultyInput") && document.activeElement !== $("#difficultyInput")) {
     $("#difficultyInput").value = status.difficulty;
   }
-  if ($("#targetPrefixInput") && document.activeElement !== $("#targetPrefixInput")) {
-    $("#targetPrefixInput").placeholder = `例如 000b；当前 ${currentTargetPreview}`;
-  }
   $("#mempoolCount").textContent = `${status.mempool.count} 笔`;
   $("#mempoolBytes").textContent = formatBytes(status.mempool.bytes);
   $("#version").textContent = `v${status.version}`;
@@ -155,7 +145,7 @@ function renderStatus(status) {
   $("#miningBadge").textContent = status.mining.status;
   $("#miningBadge").className = `status-badge ${miningStateClass}`;
   $("#miningHint").textContent = isMining
-    ? `正在寻找满足 hash ${currentTargetPreview} 的区块；${momentumText(policy)}。`
+    ? `正在寻找满足 hash ${currentTargetPreview} 的区块；自动调整每次只改变 1 个二进制前导 0 位。`
     : status.mining.hash
       ? `挖矿已暂停。保留最近一次 nonce/hash；当前目标 ${currentTargetPreview}。`
       : `点击开始挖矿后，节点会寻找满足 hash ${currentTargetPreview} 的候选区块。`;
@@ -176,6 +166,7 @@ function renderStatus(status) {
   $("#startMiningBtn").disabled = isMining;
   $("#stopMiningBtn").disabled = !isMining;
   renderLogs(status.logs || []);
+  renderSecurityEvents(status.security?.events || []);
 }
 
 function renderJoinInfo(status) {
@@ -253,6 +244,35 @@ function renderLogs(logs) {
     row.innerHTML = `<span class="log-time">${new Date(item.time * 1000).toLocaleTimeString()}</span><span>${item.message}</span>`;
     root.appendChild(row);
   }
+}
+
+function renderSecurityEvents(events) {
+  const body = $("#securityTable");
+  if (!body) return;
+  body.innerHTML = "";
+  if (!events.length) {
+    body.innerHTML = `<tr><td colspan="7">暂无安全告警</td></tr>`;
+    return;
+  }
+  for (const item of events) {
+    const row = document.createElement("tr");
+    if (item.severity === "warning" || item.severity === "critical") row.className = "warning-row";
+    row.innerHTML = `
+      <td>${formatTime(item.time)}</td>
+      <td>${item.type || ""}</td>
+      <td>${item.peer_name || "--"}</td>
+      <td class="mono">${formatHostPort(item.peer_ip, item.peer_port) || item.source || "--"}</td>
+      <td class="mono">${shortHash(item.wallet_address || "", 8)}</td>
+      <td class="mono">${shortHash(item.tx_id || item.block_hash || "", 8)}</td>
+      <td>${item.reason || item.message || ""}</td>
+    `;
+    body.appendChild(row);
+  }
+}
+
+async function refreshSecurityEvents() {
+  const data = await api("/api/security-events");
+  renderSecurityEvents(data.events || []);
 }
 
 async function refreshStatus() {
@@ -370,6 +390,7 @@ function setupTabs() {
       $(`#tab-${tab.dataset.tab}`).classList.add("active");
       if (tab.dataset.tab === "nodes") refreshPeers().catch((err) => showToast(err.message));
       if (tab.dataset.tab === "explorer") refreshBlocks().catch((err) => showToast(err.message));
+      if (tab.dataset.tab === "security") refreshSecurityEvents().catch((err) => showToast(err.message));
       if (tab.dataset.tab === "classroom" && isAdministrator) {
         refreshClassroom().catch((err) => showToast(err.message));
       }
@@ -382,6 +403,7 @@ function setupActions() {
   $("#refreshBtn").addEventListener("click", () => refreshStatus().catch((err) => showToast(err.message)));
   $("#refreshLogsBtn").addEventListener("click", () => refreshStatus().catch((err) => showToast(err.message)));
   $("#refreshPeersBtn").addEventListener("click", () => refreshPeers().catch((err) => showToast(err.message)));
+  $("#refreshSecurityBtn").addEventListener("click", () => refreshSecurityEvents().catch((err) => showToast(err.message)));
   $("#refreshBlocksBtn").addEventListener("click", () => refreshBlocks().catch((err) => showToast(err.message)));
   $("#refreshClassroomBtn").addEventListener("click", () => refreshClassroom().catch((err) => showToast(err.message)));
   $("#refreshLabBtn").addEventListener("click", () => {
@@ -422,7 +444,6 @@ function setupActions() {
   $("#syncTopBtn").addEventListener("click", syncBlocks);
   $("#syncNodesBtn").addEventListener("click", syncBlocks);
   $("#difficultyForm").addEventListener("submit", saveDifficulty);
-  $("#targetPrefixForm").addEventListener("submit", saveTargetPrefix);
   $("#resetChainBtn").addEventListener("click", resetChain);
 
   $("#startMiningBtn").addEventListener("click", async () => {
@@ -484,7 +505,6 @@ function setupActions() {
       receiver: $("#receiverInput").value.trim(),
       amount: Number($("#amountInput").value),
       fee: Number($("#feeInput").value),
-      confirmations: Number($("#confirmationsInput").value || 10),
       note: $("#noteInput").value.trim() || null,
     };
     try {
@@ -529,8 +549,8 @@ async function syncBlocks() {
 async function saveDifficulty(event) {
   event.preventDefault();
   const difficulty = Number($("#difficultyInput").value);
-  if (!Number.isInteger(difficulty) || difficulty < 0 || difficulty > 12) {
-    showToast("难度必须是 0 到 12 的整数");
+  if (!Number.isInteger(difficulty) || difficulty < 0 || difficulty > 255) {
+    showToast("难度必须是 0 到 255 的整数");
     return;
   }
   try {
@@ -542,27 +562,6 @@ async function saveDifficulty(event) {
     showToast(`难度已设置为 ${result.difficulty}${suffix}`);
     await refreshStatus();
     await refreshBlocks(false);
-  } catch (err) {
-    showToast(err.message);
-  }
-}
-
-async function saveTargetPrefix(event) {
-  event.preventDefault();
-  const targetPrefix = $("#targetPrefixInput").value.trim();
-  if (!/^(?:0x)?[0-9a-f]{1,64}$/i.test(targetPrefix)) {
-    showToast("目标前缀必须是 1 到 64 位十六进制字符");
-    return;
-  }
-  try {
-    const result = await api("/api/settings/target-prefix", {
-      method: "POST",
-      body: JSON.stringify({ target_prefix: targetPrefix }),
-    });
-    const suffix = result.requires_reset ? "；重置到创世块后生效" : "";
-    showToast(`初始目标已设置为 ${result.target_preview}${suffix}`);
-    $("#targetPrefixInput").value = "";
-    await refreshStatus();
   } catch (err) {
     showToast(err.message);
   }
@@ -646,7 +645,7 @@ function renderBlockDetail(detail) {
   setText("#detailMerkle", detail.merkle_root || "--");
   setText("#detailTime", formatTime(detail.timestamp));
   setText("#detailTxCount", `${detail.tx_count} 笔`);
-  setText("#detailDifficulty", detail.target || targetPreview(null, detail.difficulty));
+  setText("#detailDifficulty", targetPreview(detail.target, detail.difficulty));
   $("#detailDifficulty").title = detail.target || "";
   setText("#detailNonce", detail.nonce);
 

@@ -87,6 +87,7 @@ class Miner:
                         break
                     block["header"]["nonce"] = nonce
                     block_hash = compute_block_hash(block)
+                    await asyncio.sleep(0.001)
                     self.current_nonce = nonce
                     self.current_hash = block_hash
                     meets_work = (

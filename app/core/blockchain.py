@@ -8,12 +8,9 @@ from app.core.block import (
     compute_block_hash,
     create_block,
     difficulty_to_target,
-    effective_target,
     genesis_block,
-    hash_meets_difficulty,
     hash_meets_target,
     normalize_target_hex,
-    target_prefix_to_hex,
     target_preview,
     target_to_difficulty,
 )
@@ -49,11 +46,7 @@ class Blockchain:
 
     @property
     def difficulty_mode(self) -> str:
-        return str(self.config.get("difficulty_mode", "adaptive_target"))
-
-    @property
-    def adaptive_target(self) -> bool:
-        return self.difficulty_mode == "adaptive_target"
+        return str(self.config.get("difficulty_mode", "binary_leading_zero"))
 
     @property
     def target_block_seconds(self) -> int:
@@ -67,21 +60,9 @@ class Blockchain:
     def difficulty_adjustment_tolerance(self) -> float:
         return max(float(self.config.get("difficulty_adjustment_tolerance", 0.25)), 0.0)
 
-    @property
-    def difficulty_max_step(self) -> int:
-        return max(int(self.config.get("difficulty_max_step", 1)), 1)
-
-    @property
-    def target_adjustment_base_bps(self) -> int:
-        return min(max(int(self.config.get("target_adjustment_base_bps", 1000)), 1), 5000)
-
-    @property
-    def target_adjustment_max_multiplier(self) -> int:
-        return min(max(int(self.config.get("target_adjustment_max_multiplier", 5)), 1), 10)
-
     def _clamp_difficulty(self, difficulty: int) -> int:
         minimum = int(self.config.get("min_difficulty", 0))
-        maximum = int(self.config.get("max_difficulty", 12))
+        maximum = int(self.config.get("max_difficulty", 255))
         return min(max(int(difficulty), minimum), maximum)
 
     def _base_difficulty(self) -> int:
@@ -89,14 +70,11 @@ class Blockchain:
 
     def _clamp_target(self, target: str | int) -> str:
         value = int(normalize_target_hex(target), 16)
-        hardest = int(difficulty_to_target(int(self.config.get("max_difficulty", 12))), 16)
+        hardest = int(difficulty_to_target(int(self.config.get("max_difficulty", 255))), 16)
         easiest = int(difficulty_to_target(int(self.config.get("min_difficulty", 0))), 16)
         return normalize_target_hex(min(max(value, hardest), easiest))
 
     def _base_target(self) -> str:
-        prefix = self.config.get("initial_target_prefix")
-        if prefix:
-            return self._clamp_target(target_prefix_to_hex(str(prefix)))
         return self._clamp_target(difficulty_to_target(self._base_difficulty()))
 
     def _retarget_difficulty(
@@ -108,13 +86,12 @@ class Blockchain:
         expected_span = self.difficulty_adjustment_interval * self.target_block_seconds
         actual_span = max(int(last_timestamp) - int(first_timestamp), 1)
         tolerance = self.difficulty_adjustment_tolerance
-        step = self.difficulty_max_step
         previous = self._clamp_difficulty(previous_difficulty)
 
         if actual_span < expected_span * (1 - tolerance):
-            return self._clamp_difficulty(previous + step)
+            return self._clamp_difficulty(previous + 1)
         if actual_span > expected_span * (1 + tolerance):
-            return self._clamp_difficulty(previous - step)
+            return self._clamp_difficulty(previous - 1)
         return previous
 
     def _expected_legacy_difficulty(self, height: int | None = None) -> int:
@@ -162,143 +139,15 @@ class Blockchain:
             int(blocks[height - 1]["header"]["timestamp"]),
         )
 
-    def _target_adjustment_context(
-        self,
-        end_height: int,
-        timestamp_at: Callable[[int], int | None],
-    ) -> dict[str, int]:
-        interval = self.difficulty_adjustment_interval
-        expected_span = interval * self.target_block_seconds
-        start_height = max(1, end_height - interval + 1)
-        first_timestamp = timestamp_at(start_height)
-        last_timestamp = timestamp_at(end_height)
-        if first_timestamp is None or last_timestamp is None:
-            return {
-                "direction": 0,
-                "streak": 0,
-                "actual_span": 0,
-                "expected_span": expected_span,
-                "adjustment_bps": 0,
-            }
-
-        actual_span = max(int(last_timestamp) - int(first_timestamp), 1)
-        tolerance = self.difficulty_adjustment_tolerance
-        if actual_span < expected_span * (1 - tolerance):
-            direction = -1
-        elif actual_span > expected_span * (1 + tolerance):
-            direction = 1
-        else:
-            direction = 0
-
-        streak = 0
-        previous_end = end_height
-        while direction and streak < self.target_adjustment_max_multiplier:
-            previous_start = max(1, previous_end - interval + 1)
-            previous_first = timestamp_at(previous_start)
-            previous_last = timestamp_at(previous_end)
-            if previous_first is None or previous_last is None:
-                break
-            previous_span = max(int(previous_last) - int(previous_first), 1)
-            if previous_span < expected_span * (1 - tolerance):
-                previous_direction = -1
-            elif previous_span > expected_span * (1 + tolerance):
-                previous_direction = 1
-            else:
-                previous_direction = 0
-            if previous_direction != direction:
-                break
-            streak += 1
-            previous_end -= interval
-            if previous_end < interval:
-                break
-
-        return {
-            "direction": direction,
-            "streak": streak,
-            "actual_span": actual_span,
-            "expected_span": expected_span,
-            "adjustment_bps": min(
-                self.target_adjustment_base_bps * streak,
-                9000,
-            ),
-        }
-
-    def _retarget_target(self, previous_target: str, direction: int, streak: int) -> str:
-        if not direction or not streak:
-            return self._clamp_target(previous_target)
-        previous = int(normalize_target_hex(previous_target), 16)
-        adjustment_bps = min(self.target_adjustment_base_bps * streak, 9000)
-        scale = 10000 + (direction * adjustment_bps)
-        adjusted = (previous * scale) // 10000
-        if adjusted == previous:
-            adjusted += direction
-        return self._clamp_target(adjusted)
-
     def expected_target(self, height: int | None = None) -> str:
-        target_height = int(height or (self.height() + 1))
-        base = self._base_target()
-        if not self.adaptive_target:
-            return difficulty_to_target(self._expected_legacy_difficulty(target_height))
-        if not self.auto_difficulty or target_height <= 1:
-            return base
-
-        previous = self.store.get_block_by_height(target_height - 1)
-        if not previous:
-            return base
-        previous_target = (
-            normalize_target_hex(previous["target"])
-            if previous.get("target")
-            else difficulty_to_target(int(previous["difficulty"]))
-        )
-        interval = self.difficulty_adjustment_interval
-        if target_height <= interval or (target_height - 1) % interval != 0:
-            return self._clamp_target(previous_target)
-
-        context = self._target_adjustment_context(
-            target_height - 1,
-            lambda block_height: (
-                int(block["timestamp"])
-                if (block := self.store.get_block_by_height(block_height))
-                else None
-            ),
-        )
-        return self._retarget_target(
-            previous_target,
-            context["direction"],
-            context["streak"],
-        )
+        return self._clamp_target(difficulty_to_target(self.expected_difficulty(height)))
 
     def _expected_target_from_chain(self, blocks: list[dict[str, Any]], height: int) -> str:
-        base = self._base_target()
-        if not self.adaptive_target:
-            return difficulty_to_target(
-                self._expected_legacy_difficulty_from_chain(blocks, height)
-            )
-        if not self.auto_difficulty or height <= 1:
-            return base
-
-        previous_target = effective_target(blocks[height - 1]["header"])
-        interval = self.difficulty_adjustment_interval
-        if height <= interval or (height - 1) % interval != 0:
-            return self._clamp_target(previous_target)
-
-        context = self._target_adjustment_context(
-            height - 1,
-            lambda block_height: (
-                int(blocks[block_height]["header"]["timestamp"])
-                if 0 <= block_height < len(blocks)
-                else None
-            ),
-        )
-        return self._retarget_target(
-            previous_target,
-            context["direction"],
-            context["streak"],
+        return self._clamp_target(
+            difficulty_to_target(self._expected_legacy_difficulty_from_chain(blocks, height))
         )
 
     def expected_difficulty(self, height: int | None = None) -> int:
-        if self.adaptive_target:
-            return target_to_difficulty(self.expected_target(height))
         return self._expected_legacy_difficulty(height)
 
     def next_difficulty_adjustment_height(self) -> int | None:
@@ -316,20 +165,20 @@ class Blockchain:
         current_target = self.expected_target()
         height = self.height()
         last_adjustment_end = (height // self.difficulty_adjustment_interval) * self.difficulty_adjustment_interval
-        context = self._target_adjustment_context(
-            last_adjustment_end,
-            lambda block_height: (
-                int(block["timestamp"])
-                if (block := self.store.get_block_by_height(block_height))
-                else None
-            ),
-        ) if last_adjustment_end >= self.difficulty_adjustment_interval else {
-            "direction": 0,
-            "streak": 0,
-            "actual_span": 0,
-            "expected_span": self.difficulty_adjustment_interval * self.target_block_seconds,
-            "adjustment_bps": 0,
-        }
+        expected_span = self.difficulty_adjustment_interval * self.target_block_seconds
+        actual_span = 0
+        adjustment_direction = 0
+        if last_adjustment_end >= self.difficulty_adjustment_interval:
+            start_height = max(1, last_adjustment_end - self.difficulty_adjustment_interval + 1)
+            start = self.store.get_block_by_height(start_height)
+            end = self.store.get_block_by_height(last_adjustment_end)
+            if start and end:
+                actual_span = max(int(end["timestamp"]) - int(start["timestamp"]), 1)
+                tolerance = self.difficulty_adjustment_tolerance
+                if actual_span < expected_span * (1 - tolerance):
+                    adjustment_direction = 1
+                elif actual_span > expected_span * (1 + tolerance):
+                    adjustment_direction = -1
         return {
             "auto": self.auto_difficulty,
             "mode": self.difficulty_mode,
@@ -340,13 +189,10 @@ class Blockchain:
             "current_target_preview": target_preview(current_target),
             "target_block_seconds": self.target_block_seconds,
             "adjustment_interval_blocks": self.difficulty_adjustment_interval,
-            "adjustment_base_bps": self.target_adjustment_base_bps,
-            "adjustment_max_multiplier": self.target_adjustment_max_multiplier,
-            "momentum_direction": context["direction"],
-            "momentum_streak": context["streak"],
-            "momentum_adjustment_bps": context["adjustment_bps"],
-            "last_actual_span": context["actual_span"],
-            "expected_span": context["expected_span"],
+            "adjustment_step_bits": 1,
+            "last_adjustment_direction": adjustment_direction,
+            "last_actual_span": actual_span,
+            "expected_span": expected_span,
             "next_adjustment_height": self.next_difficulty_adjustment_height(),
         }
 
@@ -424,10 +270,6 @@ class Blockchain:
 
         block_hash = compute_block_hash(block)
         next_height = self.height() + 1
-        if self.adaptive_target and header.get("target") is None:
-            raise ValueError("adaptive target block header missing target")
-        if not self.adaptive_target and header.get("target") is not None:
-            raise ValueError("legacy difficulty block must not contain target")
         if header.get("target") is not None:
             expected_target = self.expected_target(next_height)
             actual_target = normalize_target_hex(header["target"])
@@ -446,14 +288,7 @@ class Blockchain:
             if not hash_meets_target(block_hash, actual_target):
                 raise ValueError("block hash does not meet target")
         else:
-            expected_difficulty = self._expected_legacy_difficulty(next_height)
-            if int(header["difficulty"]) != expected_difficulty:
-                raise ValueError(
-                    f"difficulty mismatch at height {next_height}: "
-                    f"expected {expected_difficulty}, got {header['difficulty']}"
-                )
-            if not hash_meets_difficulty(block_hash, int(header["difficulty"])):
-                raise ValueError("block hash does not meet difficulty")
+            raise ValueError("binary target block header missing target")
         if self.store.has_block_hash(block_hash):
             raise ValueError("block already exists")
         if header["prev_hash"] != self.tip_hash():
@@ -537,7 +372,6 @@ class Blockchain:
         block_hashes = [expected_genesis_hash]
         balances: dict[str, float] = {}
         seen_tx_ids: set[str] = set()
-        target_mode_started = False
 
         for height, block in enumerate(blocks[1:], start=1):
             if "header" not in block or "transactions" not in block:
@@ -551,35 +385,24 @@ class Blockchain:
                 raise ValueError(f"block {height} does not connect to replacement chain")
 
             block_hash = compute_block_hash(block)
-            if header.get("target") is not None:
-                target_mode_started = True
-                expected_target = self._expected_target_from_chain(blocks, height)
-                actual_target = normalize_target_hex(header["target"])
-                if actual_target != expected_target:
-                    raise ValueError(
-                        f"block {height} target mismatch: "
-                        f"expected {target_preview(expected_target)}, "
-                        f"got {target_preview(actual_target)}"
-                    )
-                expected_difficulty = target_to_difficulty(expected_target)
-                if int(header["difficulty"]) != expected_difficulty:
-                    raise ValueError(
-                        f"block {height} difficulty display mismatch: "
-                        f"expected {expected_difficulty}, got {header['difficulty']}"
-                    )
-                if not hash_meets_target(block_hash, actual_target):
-                    raise ValueError(f"block {height} hash does not meet its header target")
-            else:
-                if target_mode_started:
-                    raise ValueError(f"block {height} is missing target after target mode started")
-                expected_difficulty = self._expected_legacy_difficulty_from_chain(blocks, height)
-                if int(header["difficulty"]) != expected_difficulty:
-                    raise ValueError(
-                        f"block {height} difficulty mismatch: "
-                        f"expected {expected_difficulty}, got {header['difficulty']}"
-                    )
-                if not hash_meets_difficulty(block_hash, int(header["difficulty"])):
-                    raise ValueError(f"block {height} hash does not meet its header difficulty")
+            if header.get("target") is None:
+                raise ValueError(f"block {height} is missing target")
+            expected_target = self._expected_target_from_chain(blocks, height)
+            actual_target = normalize_target_hex(header["target"])
+            if actual_target != expected_target:
+                raise ValueError(
+                    f"block {height} target mismatch: "
+                    f"expected {target_preview(expected_target)}, "
+                    f"got {target_preview(actual_target)}"
+                )
+            expected_difficulty = target_to_difficulty(expected_target)
+            if int(header["difficulty"]) != expected_difficulty:
+                raise ValueError(
+                    f"block {height} difficulty display mismatch: "
+                    f"expected {expected_difficulty}, got {header['difficulty']}"
+                )
+            if not hash_meets_target(block_hash, actual_target):
+                raise ValueError(f"block {height} hash does not meet its header target")
 
             transactions = block.get("transactions", [])
             if not isinstance(transactions, list):
@@ -699,16 +522,10 @@ class Blockchain:
             height=self.height() + 1,
         )
         next_height = self.height() + 1
-        if self.adaptive_target:
-            target = self.expected_target(next_height)
-            return create_block(
-                prev_hash=self.tip_hash(),
-                transactions=[coinbase, *transfers],
-                difficulty=target_to_difficulty(target),
-                target=target,
-            )
+        target = self.expected_target(next_height)
         return create_block(
             prev_hash=self.tip_hash(),
             transactions=[coinbase, *transfers],
-            difficulty=self.expected_difficulty(next_height),
+            difficulty=target_to_difficulty(target),
+            target=target,
         )

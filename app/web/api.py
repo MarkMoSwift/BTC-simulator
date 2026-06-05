@@ -16,7 +16,6 @@ class SendTransactionRequest(BaseModel):
     receiver: str = Field(min_length=1)
     amount: float = Field(gt=0)
     fee: float = Field(ge=0)
-    confirmations: int = 10
     note: str | None = None
 
 
@@ -30,11 +29,7 @@ class PeerRequest(BaseModel):
 
 
 class DifficultyRequest(BaseModel):
-    difficulty: int = Field(ge=0, le=12)
-
-
-class TargetPrefixRequest(BaseModel):
-    target_prefix: str = Field(min_length=1, max_length=66)
+    difficulty: int = Field(ge=0, le=255)
 
 
 def create_web_app(service: NodeService) -> FastAPI:
@@ -114,6 +109,10 @@ def create_web_app(service: NodeService) -> FastAPI:
     async def classroom() -> dict[str, Any]:
         return service.classroom_status()
 
+    @app.get("/api/security-events")
+    async def security_events(limit: int = 100) -> dict[str, Any]:
+        return service.security_status(limit=limit)
+
     @app.post("/api/peers")
     async def connect_peer(payload: PeerRequest) -> dict[str, Any]:
         accepted, message = await service.connect_peer(payload.ip, payload.port)
@@ -129,13 +128,6 @@ def create_web_app(service: NodeService) -> FastAPI:
     async def set_difficulty(payload: DifficultyRequest) -> dict[str, Any]:
         try:
             return await service.set_difficulty(payload.difficulty)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/settings/target-prefix")
-    async def set_target_prefix(payload: TargetPrefixRequest) -> dict[str, Any]:
-        try:
-            return await service.set_target_prefix(payload.target_prefix)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

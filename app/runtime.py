@@ -7,7 +7,7 @@ from collections import deque
 from typing import Any
 
 from app.config import network_identity, resolve_project_path, save_config
-from app.core.block import target_prefix_to_hex, target_preview
+from app.core.block import target_preview
 from app.core.blockchain import Blockchain
 from app.core.mempool import Mempool
 from app.core.miner import Miner
@@ -29,8 +29,10 @@ class EventLog:
     def __init__(self, maxlen: int = 300):
         self.items: deque[dict[str, Any]] = deque(maxlen=maxlen)
 
-    def add(self, message: str) -> None:
-        self.items.appendleft({"time": int(time.time()), "message": message})
+    def add(self, message: str, **fields: Any) -> None:
+        item = {"time": int(time.time()), "message": message}
+        item.update(fields)
+        self.items.appendleft(item)
 
     def recent(self, limit: int = 80) -> list[dict[str, Any]]:
         return list(self.items)[:limit]
@@ -41,6 +43,7 @@ class NodeService:
         self.config = config
         storage_path = resolve_project_path(config, config["storage"]["path"])
         self.events = EventLog()
+        self.security_events = EventLog(maxlen=500)
         self.store = SQLiteStore(storage_path)
         self.blockchain = Blockchain(config, self.store, self.log)
         self._ensure_default_wallet()
@@ -50,6 +53,37 @@ class NodeService:
 
     def log(self, message: str) -> None:
         self.events.add(message)
+
+    def record_security_event(
+        self,
+        event_type: str,
+        source: str,
+        reason: str,
+        *,
+        severity: str = "warning",
+        peer_name: str | None = None,
+        peer_ip: str | None = None,
+        peer_port: int | None = None,
+        wallet_address: str | None = None,
+        tx_id: str | None = None,
+        block_hash: str | None = None,
+    ) -> None:
+        label = peer_name or source or "unknown"
+        message = f"{event_type} from {label}: {reason}"
+        self.security_events.add(
+            message,
+            type=event_type,
+            severity=severity,
+            source=source,
+            reason=reason,
+            peer_name=peer_name,
+            peer_ip=peer_ip,
+            peer_port=peer_port,
+            wallet_address=wallet_address,
+            tx_id=tx_id,
+            block_hash=block_hash,
+        )
+        self.log(f"Security alert: {message}")
 
     def _route_ip(self, family: socket.AddressFamily, target: str) -> str | None:
         sock = socket.socket(family, socket.SOCK_DGRAM)
@@ -174,7 +208,6 @@ class NodeService:
         if was_mining:
             await self.miner.stop()
         self.config["difficulty"] = difficulty
-        self.config["initial_target_prefix"] = None
         save_config(self.config)
         self.p2p.identity = network_identity(self.config)
         self.log(f"Difficulty set to {difficulty}")
@@ -182,27 +215,6 @@ class NodeService:
             "difficulty": difficulty,
             "mining_stopped": was_mining,
             "message": "difficulty updated",
-        }
-
-    async def set_target_prefix(self, prefix: str) -> dict[str, Any]:
-        normalized_prefix = str(prefix).strip().lower()
-        target = target_prefix_to_hex(normalized_prefix)
-        if self.blockchain._clamp_target(target) != target:
-            raise ValueError("target prefix is outside configured min/max difficulty bounds")
-        was_mining = self.miner.is_mining
-        if was_mining:
-            await self.miner.stop()
-        self.config["initial_target_prefix"] = normalized_prefix.removeprefix("0x")
-        save_config(self.config)
-        self.p2p.identity = network_identity(self.config)
-        self.log(f"Initial target prefix set to {self.config['initial_target_prefix']}")
-        return {
-            "target_prefix": self.config["initial_target_prefix"],
-            "target": target,
-            "target_preview": target_preview(target),
-            "mining_stopped": was_mining,
-            "requires_reset": self.blockchain.height() > 0,
-            "message": "initial target prefix updated",
         }
 
     async def reset_chain(self) -> dict[str, Any]:
@@ -322,6 +334,13 @@ class NodeService:
             "network": network,
         }
 
+    def security_status(self, limit: int = 100) -> dict[str, Any]:
+        events = self.security_events.recent(limit)
+        return {
+            "count": len(events),
+            "events": events,
+        }
+
     def status(self) -> dict[str, Any]:
         wallet = self.default_wallet()
         tip = self.blockchain.tip()
@@ -356,4 +375,5 @@ class NodeService:
             "mempool": mempool_stats,
             "peers": peers,
             "logs": self.events.recent(),
+            "security": self.security_status(limit=20),
         }

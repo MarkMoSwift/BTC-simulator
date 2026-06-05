@@ -60,6 +60,7 @@
       <button class="tab" data-tab="explorer" type="button">浏览器</button>
       <button class="tab" data-tab="join" type="button">入网</button>
       <button class="tab" data-tab="lab" type="button">实验</button>
+      <button class="tab" data-tab="security" type="button">安全</button>
       <button class="tab admin-only" data-tab="classroom" type="button" hidden>教师</button>
     </nav>
 
@@ -107,16 +108,8 @@
               <div class="admin-settings">
                 <form class="difficulty-form" id="difficultyForm">
                   <label>
-                    <span>初始前导零</span>
-                    <input id="difficultyInput" type="number" min="0" max="12" step="1" value="5">
-                  </label>
-                  <button class="primary-btn" type="submit">保存</button>
-                </form>
-                <form class="difficulty-form target-form" id="targetPrefixForm">
-                  <label>
-                    <span>精细目标前缀</span>
-                    <input id="targetPrefixInput" type="text" maxlength="66" placeholder="例如 000b" autocomplete="off">
-                    <small>哈希需小于此目标；数值越小，挖矿越难。</small>
+                    <span>二进制前导零</span>
+                    <input id="difficultyInput" type="number" min="0" max="255" step="1" value="5">
                   </label>
                   <button class="primary-btn" type="submit">保存</button>
                 </form>
@@ -161,8 +154,8 @@
               <input id="feeInput" name="fee" type="number" min="0" step="0.00000001" value="0.01" required>
             </label>
             <label>
-              <span>到账确认块数</span>
-              <input id="confirmationsInput" name="confirmations" type="number" min="1" step="1" value="10">
+              <span>到账确认块数（仅展示）</span>
+              <input id="confirmationsInput" name="confirmations" type="number" min="1" step="1" value="10" readonly>
             </label>
             <label class="wide">
               <span>备注</span>
@@ -412,6 +405,31 @@
             </div>
           </section>
         </div>
+      </section>
+
+      <section class="tab-panel" id="tab-security">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>安全告警</h2>
+            <button class="ghost-btn" id="refreshSecurityBtn" type="button">刷新告警</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>类型</th>
+                  <th>节点</th>
+                  <th>IP:Port</th>
+                  <th>钱包地址</th>
+                  <th>对象</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="securityTable"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section class="tab-panel admin-only" id="tab-classroom" hidden>

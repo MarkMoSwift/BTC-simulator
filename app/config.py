@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import copy
 import json
+import re
+import secrets
+import string
 from pathlib import Path
 from typing import Any
 
@@ -19,18 +22,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "listen_port": 7464,
     "web_host": "127.0.0.1",
     "web_port": 8000,
-    "difficulty_mode": "adaptive_target",
-    "difficulty": 5,
-    "initial_target_prefix": "000",
+    "difficulty_mode": "binary_leading_zero",
+    "difficulty": 12,
     "auto_difficulty": True,
     "target_block_seconds": 60,
     "difficulty_adjustment_interval": 10,
     "difficulty_adjustment_tolerance": 0.25,
-    "difficulty_max_step": 1,
-    "target_adjustment_base_bps": 1000,
-    "target_adjustment_max_multiplier": 5,
     "min_difficulty": 0,
-    "max_difficulty": 12,
+    "max_difficulty": 255,
     "mining_reward": 50.0,
     "max_block_transactions": 100,
     "mempool_max_bytes": 314572800,
@@ -49,14 +48,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
 CONSENSUS_PARAM_KEYS = (
     "difficulty_mode",
     "difficulty",
-    "initial_target_prefix",
     "auto_difficulty",
     "target_block_seconds",
     "difficulty_adjustment_interval",
     "difficulty_adjustment_tolerance",
-    "difficulty_max_step",
-    "target_adjustment_base_bps",
-    "target_adjustment_max_multiplier",
     "min_difficulty",
     "max_difficulty",
     "mining_reward",
@@ -70,6 +65,23 @@ def consensus_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def chain_params_hash(config: dict[str, Any]) -> str:
     return hash_json(consensus_params(config))
+
+
+def sanitize_node_name(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip())
+    cleaned = cleaned.strip("-")
+    return cleaned[:32] or "node"
+
+
+def random_node_name() -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    suffix = "".join(secrets.choice(alphabet) for _ in range(12))
+    return f"node-{suffix}"
+
+
+def is_default_node_name(value: str) -> bool:
+    name = str(value or "").strip().lower()
+    return name == "default"
 
 
 def network_identity(config: dict[str, Any]) -> dict[str, Any]:
