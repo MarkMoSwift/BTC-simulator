@@ -9,6 +9,10 @@ def test_parse_peer_accepts_host_port():
     assert parse_peer("192.168.1.23:7464") == ["192.168.1.23", 7464]
 
 
+def test_parse_peer_accepts_bracketed_ipv6():
+    assert parse_peer("[2001:db8::23]:7464") == ["2001:db8::23", 7464]
+
+
 def test_parse_peer_rejects_bad_port():
     try:
         parse_peer("192.168.1.23:not-a-port")
@@ -31,6 +35,9 @@ def test_build_config_for_lan_node():
     assert config["node_name"] == "Alice-Node"
     assert config["network_id"] == "btc-sim-classroom"
     assert config["listen_ip"] == "0.0.0.0"
+    assert config["enable_ipv6"] is True
+    assert config["advertise_ip"] is None
+    assert config["advertise_ipv6"] is None
     assert config["web_host"] == "0.0.0.0"
     assert config["servers"] == [["192.168.1.10", 7464]]
     assert config["storage"]["path"] == "./data/Alice-Node.db"

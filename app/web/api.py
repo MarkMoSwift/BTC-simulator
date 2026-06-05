@@ -33,6 +33,10 @@ class DifficultyRequest(BaseModel):
     difficulty: int = Field(ge=0, le=12)
 
 
+class TargetPrefixRequest(BaseModel):
+    target_prefix: str = Field(min_length=1, max_length=66)
+
+
 def create_web_app(service: NodeService) -> FastAPI:
     app = FastAPI(title="BTC Simulator", version=service.config["version"])
     static_dir = Path(__file__).parent / "static"
@@ -125,6 +129,13 @@ def create_web_app(service: NodeService) -> FastAPI:
     async def set_difficulty(payload: DifficultyRequest) -> dict[str, Any]:
         try:
             return await service.set_difficulty(payload.difficulty)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/settings/target-prefix")
+    async def set_target_prefix(payload: TargetPrefixRequest) -> dict[str, Any]:
+        try:
+            return await service.set_target_prefix(payload.target_prefix)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

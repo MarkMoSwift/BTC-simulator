@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import time
 from asyncio import Server, StreamReader, StreamWriter
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.config import network_identity
+from app.network.address import (
+    configured_listen_hosts,
+    format_host_port,
+    is_loopback_or_unspecified,
+    normalize_host,
+)
 from app.network.protocol import block_message_id, read_json, send_json, tx_message_id
 
 LogFn = Callable[[str], None]
@@ -27,6 +34,7 @@ class PeerConnection:
     chain_params_hash: str | None = None
     height: int | None = None
     difficulty: int | None = None
+    target: str | None = None
     mining_status: str | None = None
     web_port: int | None = None
     mismatch_reason: str | None = None
@@ -34,7 +42,7 @@ class PeerConnection:
 
     @property
     def key(self) -> str:
-        return f"{self.ip}:{self.listen_port or self.port}"
+        return format_host_port(self.ip, self.listen_port or self.port)
 
 
 class P2PNode:
@@ -42,7 +50,8 @@ class P2PNode:
         self.config = config
         self.service = service
         self.log = log or (lambda _message: None)
-        self.server: Server | None = None
+        self.servers: list[Server] = []
+        self.listen_hosts = configured_listen_hosts(config)
         self.connections: dict[str, PeerConnection] = {}
         self.seen_message_ids: set[str] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -50,7 +59,11 @@ class P2PNode:
 
     def _is_self(self, ip: str, port: int) -> bool:
         own_port = int(self.config["listen_port"])
-        return int(port) == own_port and ip in {"127.0.0.1", "localhost", "0.0.0.0", self.config["listen_ip"]}
+        host = normalize_host(ip)
+        own_hosts = {normalize_host(item) for item in self.listen_hosts}
+        return int(port) == own_port and (
+            host in own_hosts or is_loopback_or_unspecified(host)
+        )
 
     def _hello(self) -> dict[str, Any]:
         wallet = self.service.store.get_default_wallet() or {}
@@ -65,6 +78,7 @@ class P2PNode:
             "web_port": int(self.config["web_port"]),
             "height": self.service.blockchain.height(),
             "difficulty": self.service.blockchain.expected_difficulty(),
+            "target": self.service.blockchain.expected_target(),
             "mining_status": self.service.miner.status,
         }
 
@@ -74,32 +88,77 @@ class P2PNode:
             "chain_params_hash": conn.chain_params_hash,
             "height": conn.height,
             "difficulty": conn.difficulty,
+            "target": conn.target,
             "mining_status": conn.mining_status,
             "web_port": conn.web_port,
             "mismatch_reason": conn.mismatch_reason,
         }
 
+    @staticmethod
+    def _accepts_ipv4(server: Server) -> bool:
+        for server_socket in server.sockets or []:
+            if server_socket.family != socket.AF_INET6:
+                continue
+            try:
+                if server_socket.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 0:
+                    return True
+            except OSError:
+                continue
+        return False
+
     async def start(self) -> None:
-        listen_ip = self.config["listen_ip"]
-        try:
-            self.server = await asyncio.start_server(
-                self._handle_inbound,
-                listen_ip,
-                int(self.config["listen_port"]),
-                limit=STREAM_LIMIT_BYTES,
+        port = int(self.config["listen_port"])
+        requested_hosts = configured_listen_hosts(self.config)
+        bound_hosts: list[str] = []
+        errors: list[OSError] = []
+
+        for host in requested_hosts:
+            try:
+                server = await asyncio.start_server(
+                    self._handle_inbound,
+                    host,
+                    port,
+                    limit=STREAM_LIMIT_BYTES,
+                )
+            except OSError as exc:
+                errors.append(exc)
+                self.log(f"P2P bind skipped {format_host_port(host, port)}: {exc}")
+                continue
+            self.servers.append(server)
+            if host not in bound_hosts:
+                bound_hosts.append(host)
+            if host == "::" and self._accepts_ipv4(server) and "0.0.0.0" not in bound_hosts:
+                bound_hosts.append("0.0.0.0")
+            if host == "::1" and self._accepts_ipv4(server) and "127.0.0.1" not in bound_hosts:
+                bound_hosts.append("127.0.0.1")
+
+        if not self.servers:
+            fallback_hosts = (
+                ["::1", "127.0.0.1"]
+                if self.config.get("enable_ipv6", True)
+                else ["127.0.0.1"]
             )
-        except PermissionError:
-            if listen_ip != "0.0.0.0":
-                raise
-            listen_ip = "127.0.0.1"
-            self.server = await asyncio.start_server(
-                self._handle_inbound,
-                listen_ip,
-                int(self.config["listen_port"]),
-                limit=STREAM_LIMIT_BYTES,
-            )
-            self.log("P2P bind to 0.0.0.0 was denied; using 127.0.0.1")
-        self.log(f"P2P listening on {listen_ip}:{self.config['listen_port']}")
+            for host in fallback_hosts:
+                try:
+                    server = await asyncio.start_server(
+                        self._handle_inbound,
+                        host,
+                        port,
+                        limit=STREAM_LIMIT_BYTES,
+                    )
+                except OSError as exc:
+                    errors.append(exc)
+                    continue
+                self.servers.append(server)
+                if host not in bound_hosts:
+                    bound_hosts.append(host)
+            if not self.servers:
+                raise errors[-1]
+            self.log("P2P wildcard bind was denied; using loopback addresses")
+
+        self.listen_hosts = bound_hosts
+        addresses = ", ".join(format_host_port(host, port) for host in bound_hosts)
+        self.log(f"P2P listening on {addresses}")
         self._track(asyncio.create_task(self.connect_configured_peers()))
 
     async def stop(self) -> None:
@@ -109,9 +168,10 @@ class P2PNode:
             conn.writer.close()
             await conn.writer.wait_closed()
         self.connections.clear()
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
+        for server in self.servers:
+            server.close()
+            await server.wait_closed()
+        self.servers.clear()
         self.log("P2P stopped")
 
     def _track(self, task: asyncio.Task[Any]) -> None:
@@ -125,9 +185,10 @@ class P2PNode:
                 await self.connect_peer(str(host), int(port))
 
     async def connect_peer(self, ip: str, port: int) -> tuple[bool, str]:
+        ip = normalize_host(ip)
         if self._is_self(ip, port):
             return False, "ignored self peer"
-        key = f"{ip}:{port}"
+        key = format_host_port(ip, port)
         if key in self.connections:
             return False, "peer already connected"
         try:
@@ -154,7 +215,7 @@ class P2PNode:
 
     async def _handle_inbound(self, reader: StreamReader, writer: StreamWriter) -> None:
         peer_info = writer.get_extra_info("peername")
-        ip = str(peer_info[0]) if peer_info else "unknown"
+        ip = normalize_host(peer_info[0]) if peer_info else "unknown"
         port = int(peer_info[1]) if peer_info else 0
         await self._connection_loop(reader, writer, ip, port, "inbound")
 
@@ -166,10 +227,12 @@ class P2PNode:
         port: int,
         direction: str,
     ) -> None:
+        ip = normalize_host(ip)
         conn = PeerConnection(reader=reader, writer=writer, ip=ip, port=port, direction=direction)
-        temp_key = f"{ip}:{port}"
+        temp_key = format_host_port(ip, port)
         self.connections[temp_key] = conn
-        self.service.store.upsert_peer(ip, port, None, None, direction, "connected", int(time.time()))
+        if direction == "outbound":
+            self.service.store.upsert_peer(ip, port, None, None, direction, "connected", int(time.time()))
         try:
             await send_json(writer, self._hello())
             while True:
@@ -238,8 +301,11 @@ class P2PNode:
         conn.chain_params_hash = str(message.get("chain_params_hash") or "")
         conn.height = int(message.get("height") or 0)
         conn.difficulty = int(message.get("difficulty") or 0)
+        conn.target = str(message.get("target") or "") or None
         conn.mining_status = str(message.get("mining_status") or "")
         conn.web_port = int(message.get("web_port") or 0) or None
+        if conn.listen_port != conn.port:
+            self.service.store.delete_peer(conn.ip, conn.port)
         old_keys = [key for key, value in self.connections.items() if value is conn]
         for key in old_keys:
             self.connections.pop(key, None)
@@ -273,7 +339,7 @@ class P2PNode:
             int(time.time()),
             **self._peer_fields(conn),
         )
-        self.log(f"Connected peer {conn.name or conn.key} at {conn.ip}:{conn.listen_port}")
+        self.log(f"Connected peer {conn.name or conn.key} at {format_host_port(conn.ip, conn.listen_port)}")
         await send_json(conn.writer, {"type": "PEERS", "peers": self.known_peers()})
         remote_height = int(message.get("height") or 0)
         if remote_height > self.service.blockchain.height():
@@ -293,7 +359,7 @@ class P2PNode:
 
     async def _handle_peers(self, message: dict[str, Any]) -> None:
         for peer in message.get("peers", []):
-            ip = str(peer.get("ip", ""))
+            ip = normalize_host(peer.get("ip", ""))
             port = int(peer.get("port", 0) or 0)
             if not ip or not port or self._is_self(ip, port):
                 continue
@@ -306,7 +372,7 @@ class P2PNode:
                 "known",
                 int(time.time()),
             )
-            if f"{ip}:{port}" not in self.connections:
+            if format_host_port(ip, port) not in self.connections:
                 self._track(asyncio.create_task(self.connect_peer(ip, port)))
 
     async def _handle_tx(self, message: dict[str, Any]) -> None:
@@ -348,7 +414,7 @@ class P2PNode:
     def known_peers(self) -> list[dict[str, Any]]:
         peers = self.service.store.list_peers()
         configured = [
-            {"ip": str(host), "port": int(port), "name": None}
+            {"ip": normalize_host(host), "port": int(port), "name": None}
             for host, port in self.config.get("servers", [])
             if not self._is_self(str(host), int(port))
         ]

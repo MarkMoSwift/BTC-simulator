@@ -26,6 +26,29 @@ function shortHash(value, size = 10) {
   return `${value.slice(0, size)}...${value.slice(-size)}`;
 }
 
+function targetPreview(value, difficulty = null) {
+  if (!value) return difficulty === null ? "--" : `前导 0 × ${difficulty}`;
+  const target = String(value).toLowerCase().replace(/^0x/, "");
+  const leadingZeros = (target.match(/^0*/) || [""])[0].length;
+  const visible = Math.min(Math.max(8, leadingZeros + 2), target.length);
+  return `≤ ${target.slice(0, visible)}${visible < target.length ? "..." : ""}`;
+}
+
+function momentumText(policy) {
+  const direction = Number(policy?.momentum_direction || 0);
+  const streak = Number(policy?.momentum_streak || 0);
+  const adjustment = Number(policy?.momentum_adjustment_bps || 0) / 100;
+  if (!direction || !streak) return "当前没有连续偏差加速";
+  return `连续${direction < 0 ? "偏快" : "偏慢"} ${streak} 个窗口，最近调节步长 ${adjustment}%`;
+}
+
+function formatHostPort(host, port) {
+  const value = String(host || "").replace(/^\[|\]$/g, "");
+  if (!value) return "";
+  if (!port) return value;
+  return value.includes(":") ? `[${value}]:${port}` : `${value}:${port}`;
+}
+
 function formatBytes(value) {
   const bytes = Number(value || 0);
   if (bytes < 1024) return `${bytes} B`;
@@ -112,11 +135,18 @@ function renderStatus(status) {
   $("#peerDetail").textContent = `入站 ${status.peers.inbound}，出站 ${status.peers.outbound}`;
   $("#miningStatus").textContent = status.mining.status;
   const policy = status.difficulty_policy || {};
-  const targetText = policy.auto ? ` · 目标 ${formatDuration(policy.target_block_seconds)}/块` : "";
-  $("#difficulty").textContent = `难度 ${status.difficulty}${targetText}`;
-  $("#miningDifficulty").textContent = status.difficulty;
+  const currentTarget = status.target || policy.current_target;
+  const currentTargetPreview = targetPreview(currentTarget, status.difficulty);
+  const targetTimeText = policy.auto ? ` · ${formatDuration(policy.target_block_seconds)}/块` : "";
+  $("#difficulty").textContent = `${currentTargetPreview}${targetTimeText}`;
+  $("#difficulty").title = currentTarget || "";
+  $("#miningDifficulty").textContent = currentTargetPreview;
+  $("#miningDifficulty").title = currentTarget || "";
   if ($("#difficultyInput") && document.activeElement !== $("#difficultyInput")) {
     $("#difficultyInput").value = status.difficulty;
+  }
+  if ($("#targetPrefixInput") && document.activeElement !== $("#targetPrefixInput")) {
+    $("#targetPrefixInput").placeholder = `例如 000b；当前 ${currentTargetPreview}`;
   }
   $("#mempoolCount").textContent = `${status.mempool.count} 笔`;
   $("#mempoolBytes").textContent = formatBytes(status.mempool.bytes);
@@ -125,10 +155,10 @@ function renderStatus(status) {
   $("#miningBadge").textContent = status.mining.status;
   $("#miningBadge").className = `status-badge ${miningStateClass}`;
   $("#miningHint").textContent = isMining
-    ? `正在尝试满足 ${"0".repeat(status.difficulty)}... 前缀的区块 hash，目标 ${formatDuration(policy.target_block_seconds || 60)} 出一块。`
+    ? `正在寻找满足 hash ${currentTargetPreview} 的区块；${momentumText(policy)}。`
     : status.mining.hash
-      ? "挖矿已暂停。下面保留的是最近一次 nonce/hash，链头 hash 表示最新已确认区块。"
-      : "点击开始挖矿后，节点会在后台生成候选区块并刷新 nonce。";
+      ? `挖矿已暂停。保留最近一次 nonce/hash；当前目标 ${currentTargetPreview}。`
+      : `点击开始挖矿后，节点会寻找满足 hash ${currentTargetPreview} 的候选区块。`;
   $("#nonceLabel").textContent = isMining ? "当前 Nonce" : "最近 Nonce";
   $("#hashLabel").textContent = isMining ? "候选 Hash" : "最近尝试 Hash";
   $("#nonce").textContent = nonceText;
@@ -150,11 +180,14 @@ function renderStatus(status) {
 
 function renderJoinInfo(status) {
   const network = status.network || {};
+  const p2pAddresses = network.p2p_addresses?.length
+    ? network.p2p_addresses
+    : [network.p2p_address].filter(Boolean);
   setText("#joinWebUrl", network.web_url || "--");
-  setText("#joinP2pAddress", network.p2p_address || "--");
+  setText("#joinP2pAddress", p2pAddresses.join(" / ") || "--");
   setText("#joinNetworkId", network.network_id || "--");
   setText("#joinParamsHash", shortHash(network.chain_params_hash || "", 12));
-  const qrText = network.p2p_address || "";
+  const qrText = p2pAddresses[0] || "";
   setText("#joinQrText", qrText || "--");
   drawJoinCode(qrText);
 }
@@ -287,9 +320,9 @@ function renderClassroom(data) {
     if (status === "参数不匹配" || node.mismatch_reason) row.className = "warning-row";
     row.innerHTML = `
       <td>${node.name || node.node_name || ""}</td>
-      <td class="mono">${node.ip || ""}:${node.port || ""}</td>
+      <td class="mono">${formatHostPort(node.ip, node.port)}</td>
       <td>${node.height ?? "--"}</td>
-      <td>${node.difficulty ?? "--"}</td>
+      <td class="mono" title="${node.target || ""}">${targetPreview(node.target, node.difficulty)}</td>
       <td>${node.mining_status || "--"}</td>
       <td>${status || "--"}</td>
       <td class="mono">${shortHash(node.chain_params_hash || "", 8)}</td>
@@ -337,8 +370,10 @@ function setupTabs() {
       $(`#tab-${tab.dataset.tab}`).classList.add("active");
       if (tab.dataset.tab === "nodes") refreshPeers().catch((err) => showToast(err.message));
       if (tab.dataset.tab === "explorer") refreshBlocks().catch((err) => showToast(err.message));
-      if (tab.dataset.tab === "classroom") refreshClassroom().catch((err) => showToast(err.message));
-      if (tab.dataset.tab === "lab") refreshClassroom().catch(() => {});
+      if (tab.dataset.tab === "classroom" && isAdministrator) {
+        refreshClassroom().catch((err) => showToast(err.message));
+      }
+      if (tab.dataset.tab === "lab" && isAdministrator) refreshClassroom().catch(() => {});
     });
   });
 }
@@ -351,17 +386,21 @@ function setupActions() {
   $("#refreshClassroomBtn").addEventListener("click", () => refreshClassroom().catch((err) => showToast(err.message)));
   $("#refreshLabBtn").addEventListener("click", () => {
     refreshStatus().catch((err) => showToast(err.message));
-    refreshClassroom().catch(() => {});
+    if (isAdministrator) refreshClassroom().catch(() => {});
   });
   $("#syncClassroomBtn").addEventListener("click", syncBlocks);
-  $("#copyP2pBtn").addEventListener("click", () => copyText(latestStatus?.network?.p2p_address, "P2P 地址"));
+  $("#copyP2pBtn").addEventListener("click", () => {
+    const network = latestStatus?.network || {};
+    copyText((network.p2p_addresses || [network.p2p_address]).filter(Boolean).join("\n"), "P2P 地址");
+  });
   $("#copyWebBtn").addEventListener("click", () => copyText(latestStatus?.network?.web_url, "Web 地址"));
   $("#copyJoinBundleBtn").addEventListener("click", () => {
     const network = latestStatus?.network || {};
+    const p2pAddresses = (network.p2p_addresses || [network.p2p_address]).filter(Boolean);
     copyText(
       [
         `Web: ${network.web_url || ""}`,
-        `P2P: ${network.p2p_address || ""}`,
+        `P2P: ${p2pAddresses.join(", ")}`,
         `Network ID: ${network.network_id || ""}`,
         `Params: ${network.chain_params_hash || ""}`,
       ].join("\n"),
@@ -383,6 +422,7 @@ function setupActions() {
   $("#syncTopBtn").addEventListener("click", syncBlocks);
   $("#syncNodesBtn").addEventListener("click", syncBlocks);
   $("#difficultyForm").addEventListener("submit", saveDifficulty);
+  $("#targetPrefixForm").addEventListener("submit", saveTargetPrefix);
   $("#resetChainBtn").addEventListener("click", resetChain);
 
   $("#startMiningBtn").addEventListener("click", async () => {
@@ -507,6 +547,27 @@ async function saveDifficulty(event) {
   }
 }
 
+async function saveTargetPrefix(event) {
+  event.preventDefault();
+  const targetPrefix = $("#targetPrefixInput").value.trim();
+  if (!/^(?:0x)?[0-9a-f]{1,64}$/i.test(targetPrefix)) {
+    showToast("目标前缀必须是 1 到 64 位十六进制字符");
+    return;
+  }
+  try {
+    const result = await api("/api/settings/target-prefix", {
+      method: "POST",
+      body: JSON.stringify({ target_prefix: targetPrefix }),
+    });
+    const suffix = result.requires_reset ? "；重置到创世块后生效" : "";
+    showToast(`初始目标已设置为 ${result.target_preview}${suffix}`);
+    $("#targetPrefixInput").value = "";
+    await refreshStatus();
+  } catch (err) {
+    showToast(err.message);
+  }
+}
+
 async function resetChain() {
   const confirmed = window.confirm("确定要重置本节点区块链吗？这会清空历史区块、交易和内存池，只保留创世块。");
   if (!confirmed) return;
@@ -548,7 +609,7 @@ function renderBlocks(blocks) {
       <td>${block.height}</td>
       <td class="mono">${shortHash(block.hash, 9)}</td>
       <td>${block.tx_count}</td>
-      <td>${block.difficulty}</td>
+      <td class="mono" title="${block.target || ""}">${targetPreview(block.target, block.difficulty)}</td>
       <td>${block.nonce}</td>
       <td>${formatTime(block.timestamp)}</td>
     `;
@@ -585,7 +646,8 @@ function renderBlockDetail(detail) {
   setText("#detailMerkle", detail.merkle_root || "--");
   setText("#detailTime", formatTime(detail.timestamp));
   setText("#detailTxCount", `${detail.tx_count} 笔`);
-  setText("#detailDifficulty", detail.difficulty);
+  setText("#detailDifficulty", detail.target || targetPreview(null, detail.difficulty));
+  $("#detailDifficulty").title = detail.target || "";
   setText("#detailNonce", detail.nonce);
 
   const txBody = $("#blockTxTable");
@@ -634,5 +696,5 @@ setupActions();
 refreshStatus().catch((err) => showToast(err.message));
 refreshPeers().catch(() => {});
 refreshBlocks().catch(() => {});
-refreshClassroom().catch(() => {});
+if (isAdministrator) refreshClassroom().catch(() => {});
 connectEvents();

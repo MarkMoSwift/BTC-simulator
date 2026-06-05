@@ -7,11 +7,20 @@ from collections import deque
 from typing import Any
 
 from app.config import network_identity, resolve_project_path, save_config
+from app.core.block import target_prefix_to_hex, target_preview
 from app.core.blockchain import Blockchain
 from app.core.mempool import Mempool
 from app.core.miner import Miner
 from app.core.transaction import create_transfer
 from app.core.wallet import generate_wallet
+from app.network.address import (
+    configured_listen_hosts,
+    format_host_port,
+    format_url_host,
+    is_ipv6_host,
+    normalize_host,
+    parse_host_port,
+)
 from app.network.node import P2PNode
 from app.storage.sqlite_store import SQLiteStore
 
@@ -42,15 +51,26 @@ class NodeService:
     def log(self, message: str) -> None:
         self.events.add(message)
 
-    def _lan_ip(self) -> str:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def _route_ip(self, family: socket.AddressFamily, target: str) -> str | None:
+        sock = socket.socket(family, socket.SOCK_DGRAM)
         try:
-            sock.connect(("8.8.8.8", 80))
-            return str(sock.getsockname()[0])
+            if family == socket.AF_INET6:
+                sock.connect((target, 80, 0, 0))
+            else:
+                sock.connect((target, 80))
+            return normalize_host(sock.getsockname()[0])
         except OSError:
-            return "127.0.0.1"
+            return None
         finally:
             sock.close()
+
+    def _lan_ip(self) -> str:
+        return self._route_ip(socket.AF_INET, "8.8.8.8") or "127.0.0.1"
+
+    def _lan_ipv6(self) -> str | None:
+        if not socket.has_ipv6:
+            return None
+        return self._route_ip(socket.AF_INET6, "2001:4860:4860::8888")
 
     def _ensure_default_wallet(self) -> None:
         if self.store.get_default_wallet():
@@ -154,6 +174,7 @@ class NodeService:
         if was_mining:
             await self.miner.stop()
         self.config["difficulty"] = difficulty
+        self.config["initial_target_prefix"] = None
         save_config(self.config)
         self.p2p.identity = network_identity(self.config)
         self.log(f"Difficulty set to {difficulty}")
@@ -161,6 +182,27 @@ class NodeService:
             "difficulty": difficulty,
             "mining_stopped": was_mining,
             "message": "difficulty updated",
+        }
+
+    async def set_target_prefix(self, prefix: str) -> dict[str, Any]:
+        normalized_prefix = str(prefix).strip().lower()
+        target = target_prefix_to_hex(normalized_prefix)
+        if self.blockchain._clamp_target(target) != target:
+            raise ValueError("target prefix is outside configured min/max difficulty bounds")
+        was_mining = self.miner.is_mining
+        if was_mining:
+            await self.miner.stop()
+        self.config["initial_target_prefix"] = normalized_prefix.removeprefix("0x")
+        save_config(self.config)
+        self.p2p.identity = network_identity(self.config)
+        self.log(f"Initial target prefix set to {self.config['initial_target_prefix']}")
+        return {
+            "target_prefix": self.config["initial_target_prefix"],
+            "target": target,
+            "target_preview": target_preview(target),
+            "mining_stopped": was_mining,
+            "requires_reset": self.blockchain.height() > 0,
+            "message": "initial target prefix updated",
         }
 
     async def reset_chain(self) -> dict[str, Any]:
@@ -190,18 +232,58 @@ class NodeService:
 
     def network_info(self) -> dict[str, Any]:
         identity = network_identity(self.config)
-        lan_ip = self._lan_ip()
-        web_host = str(self.config["web_host"])
-        web_display_host = lan_ip if web_host == "0.0.0.0" else web_host
-        listen_host = lan_ip if str(self.config["listen_ip"]) == "0.0.0.0" else str(self.config["listen_ip"])
-        web_url = f"http://{web_display_host}:{int(self.config['web_port'])}"
-        p2p_address = f"{listen_host}:{int(self.config['listen_port'])}"
+        lan_ip = normalize_host(self.config.get("advertise_ip")) or self._lan_ip()
+        lan_ipv6 = normalize_host(self.config.get("advertise_ipv6")) or self._lan_ipv6()
+        web_host = normalize_host(self.config["web_host"])
+        if web_host == "0.0.0.0":
+            web_display_host = lan_ip
+        elif web_host == "::":
+            web_display_host = lan_ipv6 or "::1"
+        else:
+            web_display_host = web_host
+        web_url = f"http://{format_url_host(web_display_host)}:{int(self.config['web_port'])}"
+
+        p2p_addresses: list[str] = []
+        listen_hosts = self.p2p.listen_hosts or configured_listen_hosts(self.config)
+        for listen_host in listen_hosts:
+            if listen_host == "0.0.0.0":
+                advertised_host = lan_ip
+            elif listen_host == "::":
+                advertised_host = lan_ipv6
+            else:
+                advertised_host = listen_host
+            if not advertised_host:
+                continue
+            address = format_host_port(advertised_host, int(self.config["listen_port"]))
+            if address not in p2p_addresses:
+                p2p_addresses.append(address)
+        if not p2p_addresses:
+            p2p_addresses.append(format_host_port(lan_ip, int(self.config["listen_port"])))
+        prefer_ipv6 = is_ipv6_host(self.config["listen_ip"])
+        primary_p2p = next(
+            (
+                address
+                for address in p2p_addresses
+                if is_ipv6_host(address.rsplit(":", 1)[0]) == prefer_ipv6
+            ),
+            p2p_addresses[0],
+        )
+        advertised_ip, _advertised_port = parse_host_port(primary_p2p)
+        lan_ips = [lan_ip, *([lan_ipv6] if lan_ipv6 else [])]
         return {
             **identity,
             "lan_ip": lan_ip,
+            "lan_ipv6": lan_ipv6,
+            "lan_ips": lan_ips,
             "web_url": web_url,
-            "p2p_address": p2p_address,
+            "p2p_address": primary_p2p,
+            "p2p_addresses": p2p_addresses,
+            "advertised_ip": advertised_ip,
+            "advertise_ip": self.config.get("advertise_ip"),
+            "advertise_ipv6": self.config.get("advertise_ipv6"),
             "listen_ip": self.config["listen_ip"],
+            "listen_ips": list(self.p2p.listen_hosts),
+            "enable_ipv6": bool(self.config.get("enable_ipv6", True)),
             "listen_port": int(self.config["listen_port"]),
             "web_host": self.config["web_host"],
             "web_port": int(self.config["web_port"]),
@@ -212,13 +294,14 @@ class NodeService:
         network = status["network"]
         own = {
             "name": status["node_name"],
-            "ip": network["lan_ip"],
+            "ip": network["advertised_ip"],
             "port": network["listen_port"],
             "address": status["wallet"]["address"],
             "status": "本机",
             "direction": "self",
             "height": status["height"],
             "difficulty": status["difficulty"],
+            "target": status["target"],
             "mining_status": status["mining"]["status"],
             "network_id": network["network_id"],
             "chain_params_hash": network["chain_params_hash"],
@@ -244,6 +327,7 @@ class NodeService:
         tip = self.blockchain.tip()
         peers = self.p2p.connection_counts()
         mempool_stats = self.mempool.stats()
+        target = self.blockchain.expected_target()
         return {
             "version": self.config["version"],
             "node_name": self.config["node_name"],
@@ -259,6 +343,8 @@ class NodeService:
             "tip_hash": tip["hash"],
             "last_block_time": int(tip["timestamp"]),
             "difficulty": self.blockchain.expected_difficulty(),
+            "target": target,
+            "target_preview": target_preview(target),
             "difficulty_policy": self.blockchain.difficulty_policy(),
             "network": self.network_info(),
             "mining": {

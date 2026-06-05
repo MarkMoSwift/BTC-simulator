@@ -4,7 +4,7 @@ import asyncio
 import inspect
 from typing import Any, Awaitable, Callable
 
-from app.core.block import compute_block_hash, hash_meets_difficulty
+from app.core.block import compute_block_hash, hash_meets_difficulty, hash_meets_target
 from app.core.blockchain import Blockchain
 from app.core.mempool import Mempool
 
@@ -80,6 +80,7 @@ class Miner:
                 transfers = self.blockchain.select_transactions_for_block(max_transfers)
                 block = self.blockchain.create_candidate_block(wallet["address"], transfers)
                 difficulty = int(block["header"]["difficulty"])
+                target = block["header"].get("target")
                 nonce = 0
                 while not self._stop_event.is_set():
                     if self.blockchain.tip_hash() != start_tip:
@@ -88,7 +89,12 @@ class Miner:
                     block_hash = compute_block_hash(block)
                     self.current_nonce = nonce
                     self.current_hash = block_hash
-                    if hash_meets_difficulty(block_hash, difficulty):
+                    meets_work = (
+                        hash_meets_target(block_hash, target)
+                        if target is not None
+                        else hash_meets_difficulty(block_hash, difficulty)
+                    )
+                    if meets_work:
                         accepted, message = self.blockchain.add_block(block, source="miner")
                         if accepted:
                             self.log(

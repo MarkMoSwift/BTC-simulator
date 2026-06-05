@@ -60,7 +60,7 @@
       <button class="tab" data-tab="explorer" type="button">浏览器</button>
       <button class="tab" data-tab="join" type="button">入网</button>
       <button class="tab" data-tab="lab" type="button">实验</button>
-      <button class="tab" data-tab="classroom" type="button">教师</button>
+      <button class="tab admin-only" data-tab="classroom" type="button" hidden>教师</button>
     </nav>
 
     <main>
@@ -87,8 +87,8 @@
                 <output id="nonce">--</output>
               </div>
               <div class="detail-cell">
-                <span>当前难度</span>
-                <output id="miningDifficulty">0</output>
+                <span>当前目标</span>
+                <output class="mono" id="miningDifficulty">--</output>
               </div>
               <div class="detail-cell span-2">
                 <span id="hashLabel">候选 Hash</span>
@@ -104,13 +104,23 @@
               </div>
             </div>
             <div class="chain-tools admin-only" id="adminChainTools" hidden>
-              <form class="difficulty-form" id="difficultyForm">
-                <label>
-                  <span>初始难度</span>
-                  <input id="difficultyInput" type="number" min="0" max="12" step="1" value="5">
-                </label>
-                <button class="primary-btn" type="submit">保存难度</button>
-              </form>
+              <div class="admin-settings">
+                <form class="difficulty-form" id="difficultyForm">
+                  <label>
+                    <span>初始前导零</span>
+                    <input id="difficultyInput" type="number" min="0" max="12" step="1" value="5">
+                  </label>
+                  <button class="primary-btn" type="submit">保存</button>
+                </form>
+                <form class="difficulty-form target-form" id="targetPrefixForm">
+                  <label>
+                    <span>精细目标前缀</span>
+                    <input id="targetPrefixInput" type="text" maxlength="66" placeholder="例如 000b" autocomplete="off">
+                    <small>哈希需小于此目标；数值越小，挖矿越难。</small>
+                  </label>
+                  <button class="primary-btn" type="submit">保存</button>
+                </form>
+              </div>
               <div class="danger-zone">
                 <div>
                   <strong>重置区块链</strong>
@@ -205,8 +215,8 @@
             </div>
             <form class="peer-form" id="peerForm">
               <label>
-                <span>IP</span>
-                <input id="peerIpInput" value="127.0.0.1" required>
+                <span>IP / 主机名</span>
+                <input id="peerIpInput" value="127.0.0.1" placeholder="IPv4、IPv6 或主机名" required>
               </label>
               <label>
                 <span>Port</span>
@@ -264,7 +274,7 @@
                     <th>高度</th>
                     <th>Hash</th>
                     <th>交易</th>
-                    <th>难度</th>
+                    <th>目标</th>
                     <th>Nonce</th>
                     <th>时间</th>
                   </tr>
@@ -301,8 +311,8 @@
                 <output id="detailTxCount">--</output>
               </div>
               <div class="detail-cell">
-                <span>难度</span>
-                <output id="detailDifficulty">--</output>
+                <span>目标</span>
+                <output class="mono hash-output" id="detailDifficulty">--</output>
               </div>
               <div class="detail-cell">
                 <span>Nonce</span>
@@ -404,7 +414,7 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="tab-classroom">
+      <section class="tab-panel admin-only" id="tab-classroom" hidden>
         <section class="panel">
           <div class="panel-head">
             <h2>教师总览</h2>
@@ -439,7 +449,7 @@
                   <th>节点</th>
                   <th>IP:Port</th>
                   <th>高度</th>
-                  <th>难度</th>
+                  <th>目标</th>
                   <th>挖矿</th>
                   <th>状态</th>
                   <th>参数 Hash</th>

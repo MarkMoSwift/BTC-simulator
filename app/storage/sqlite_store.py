@@ -45,6 +45,7 @@ class SQLiteStore:
                     merkle_root TEXT NOT NULL,
                     timestamp INTEGER NOT NULL,
                     difficulty INTEGER NOT NULL,
+                    target TEXT,
                     nonce INTEGER NOT NULL,
                     version INTEGER NOT NULL,
                     block_json TEXT NOT NULL
@@ -85,6 +86,7 @@ class SQLiteStore:
                     chain_params_hash TEXT,
                     height INTEGER,
                     difficulty INTEGER,
+                    target TEXT,
                     mining_status TEXT,
                     web_port INTEGER,
                     mismatch_reason TEXT,
@@ -93,12 +95,19 @@ class SQLiteStore:
                 """
             )
             self._ensure_columns(
+                "blocks",
+                {
+                    "target": "TEXT",
+                },
+            )
+            self._ensure_columns(
                 "peers",
                 {
                     "network_id": "TEXT",
                     "chain_params_hash": "TEXT",
                     "height": "INTEGER",
                     "difficulty": "INTEGER",
+                    "target": "TEXT",
                     "mining_status": "TEXT",
                     "web_port": "INTEGER",
                     "mismatch_reason": "TEXT",
@@ -170,8 +179,8 @@ class SQLiteStore:
             self.conn.execute(
                 """
                 INSERT INTO blocks
-                (height, hash, prev_hash, merkle_root, timestamp, difficulty, nonce, version, block_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (height, hash, prev_hash, merkle_root, timestamp, difficulty, target, nonce, version, block_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     height,
@@ -180,6 +189,7 @@ class SQLiteStore:
                     header["merkle_root"],
                     header["timestamp"],
                     header["difficulty"],
+                    header.get("target"),
                     header["nonce"],
                     header["version"],
                     json.dumps(block, ensure_ascii=True, sort_keys=True),
@@ -244,6 +254,7 @@ class SQLiteStore:
                     b.merkle_root,
                     b.timestamp,
                     b.difficulty,
+                    b.target,
                     b.nonce,
                     b.version,
                     COUNT(t.tx_id) AS tx_count,
@@ -406,6 +417,7 @@ class SQLiteStore:
         chain_params_hash: str | None = None,
         height: int | None = None,
         difficulty: int | None = None,
+        target: str | None = None,
         mining_status: str | None = None,
         web_port: int | None = None,
         mismatch_reason: str | None = None,
@@ -416,9 +428,9 @@ class SQLiteStore:
                 INSERT INTO peers (
                     ip, port, name, address, direction, status, last_seen,
                     network_id, chain_params_hash, height, difficulty,
-                    mining_status, web_port, mismatch_reason
+                    target, mining_status, web_port, mismatch_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ip, port) DO UPDATE SET
                     name = excluded.name,
                     address = excluded.address,
@@ -429,6 +441,7 @@ class SQLiteStore:
                     chain_params_hash = excluded.chain_params_hash,
                     height = excluded.height,
                     difficulty = excluded.difficulty,
+                    target = excluded.target,
                     mining_status = excluded.mining_status,
                     web_port = excluded.web_port,
                     mismatch_reason = excluded.mismatch_reason
@@ -445,6 +458,7 @@ class SQLiteStore:
                     chain_params_hash,
                     height,
                     difficulty,
+                    target,
                     mining_status,
                     web_port,
                     mismatch_reason,
@@ -457,9 +471,16 @@ class SQLiteStore:
                 """
                 SELECT ip, port, name, address, direction, status, last_seen,
                        network_id, chain_params_hash, height, difficulty,
-                       mining_status, web_port, mismatch_reason
+                       target, mining_status, web_port, mismatch_reason
                 FROM peers
                 ORDER BY ip, port
                 """
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def delete_peer(self, ip: str, port: int) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "DELETE FROM peers WHERE ip = ? AND port = ?",
+                (ip, int(port)),
+            )

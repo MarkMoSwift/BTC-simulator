@@ -310,11 +310,21 @@ label span,
 
 .chain-tools {
   display: grid;
-  grid-template-columns: minmax(260px, 0.45fr) minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 0.6fr) minmax(0, 1fr);
   gap: 12px;
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+
+.admin-settings,
+.danger-zone {
+  min-width: 0;
+}
+
+.admin-settings {
+  display: grid;
+  gap: 10px;
 }
 
 .difficulty-form,
@@ -331,6 +341,18 @@ label span,
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 10px;
+}
+
+.difficulty-form small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.target-form {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .danger-zone {

@@ -7,7 +7,13 @@ import time
 from pathlib import Path
 
 from app.config import DEFAULT_CONFIG, network_identity
-from app.core.block import compute_block_hash, hash_meets_difficulty
+from app.core.block import (
+    compute_block_hash,
+    difficulty_to_target,
+    hash_meets_difficulty,
+    hash_meets_target,
+    target_prefix_to_hex,
+)
 from app.core.blockchain import Blockchain
 from app.core.mempool import Mempool
 from app.core.transaction import create_transfer, validate_transfer_shape_and_signature
@@ -19,11 +25,19 @@ from app.storage.sqlite_store import SQLiteStore
 def make_stack(tmp_path: Path):
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["difficulty"] = 1
+    config["initial_target_prefix"] = None
     config["storage"]["path"] = str(tmp_path / "chain.db")
     store = SQLiteStore(config["storage"]["path"])
     chain = Blockchain(config, store)
     mempool = Mempool(store, chain)
     return config, store, chain, mempool
+
+
+def block_meets_work(block: dict, block_hash: str) -> bool:
+    target = block["header"].get("target")
+    if target is not None:
+        return hash_meets_target(block_hash, target)
+    return hash_meets_difficulty(block_hash, block["header"]["difficulty"])
 
 
 def mine_block(chain: Blockchain, miner_address: str, timestamp: int | None = None):
@@ -34,7 +48,7 @@ def mine_block(chain: Blockchain, miner_address: str, timestamp: int | None = No
     while True:
         block["header"]["nonce"] = nonce
         block_hash = compute_block_hash(block)
-        if hash_meets_difficulty(block_hash, block["header"]["difficulty"]):
+        if block_meets_work(block, block_hash):
             return block, block_hash
         nonce += 1
 
@@ -63,6 +77,14 @@ def test_wallet_signature_and_tx_id(tmp_path: Path):
         raise AssertionError("tampered transaction should be rejected")
 
 
+def test_hex_target_prefix_supports_fine_grained_work():
+    target = target_prefix_to_hex("000b")
+
+    assert target.startswith("000b")
+    assert hash_meets_target("000a" + ("f" * 60), target)
+    assert not hash_meets_target("000c" + ("0" * 60), target)
+
+
 def test_mining_reward_and_balance(tmp_path: Path):
     _config, store, chain, _mempool = make_stack(tmp_path)
     miner = generate_wallet("miner")
@@ -73,7 +95,7 @@ def test_mining_reward_and_balance(tmp_path: Path):
     while True:
         block["header"]["nonce"] = nonce
         block_hash = compute_block_hash(block)
-        if hash_meets_difficulty(block_hash, block["header"]["difficulty"]):
+        if block_meets_work(block, block_hash):
             break
         nonce += 1
 
@@ -95,7 +117,7 @@ def test_block_explorer_queries_include_block_and_transactions(tmp_path: Path):
     while True:
         block["header"]["nonce"] = nonce
         block_hash = compute_block_hash(block)
-        if hash_meets_difficulty(block_hash, block["header"]["difficulty"]):
+        if block_meets_work(block, block_hash):
             break
         nonce += 1
     accepted, message = chain.add_block(block, source="test")
@@ -104,6 +126,7 @@ def test_block_explorer_queries_include_block_and_transactions(tmp_path: Path):
     summaries = store.list_block_summaries(limit=5)
     assert summaries[0]["height"] == 1
     assert summaries[0]["tx_count"] == 1
+    assert summaries[0]["target"] == block["header"]["target"]
 
     detail = store.get_block_detail(1)
     assert detail is not None
@@ -133,7 +156,7 @@ def test_longer_replacement_chain_can_reorg_from_genesis(tmp_path: Path):
         while True:
             block["header"]["nonce"] = nonce
             block_hash = compute_block_hash(block)
-            if hash_meets_difficulty(block_hash, block["header"]["difficulty"]):
+            if block_meets_work(block, block_hash):
                 break
             nonce += 1
         accepted, message = chain.add_block(block, source="test")
@@ -174,7 +197,7 @@ def test_coinbase_tx_id_is_unique_per_height(tmp_path: Path):
     nonce = 0
     while True:
         first["header"]["nonce"] = nonce
-        if hash_meets_difficulty(compute_block_hash(first), first["header"]["difficulty"]):
+        if block_meets_work(first, compute_block_hash(first)):
             break
         nonce += 1
     accepted, message = chain.add_block(first, source="test")
@@ -197,7 +220,7 @@ def test_block_rejects_non_consensus_difficulty(tmp_path: Path):
     accepted, reason = chain.add_block(block, source="test")
 
     assert not accepted
-    assert "difficulty mismatch" in reason
+    assert "difficulty display mismatch" in reason
     store.close()
 
 
@@ -216,8 +239,12 @@ def test_auto_difficulty_increases_when_blocks_are_fast(tmp_path: Path):
         assert accepted, message
 
     assert chain.height() == 3
-    assert chain.expected_difficulty(4) == 2
-    assert chain.create_candidate_block(miner.address, [])["header"]["difficulty"] == 2
+    previous_target = chain.store.get_block_by_height(3)["target"]
+    expected_target = chain.expected_target(4)
+    candidate = chain.create_candidate_block(miner.address, [])
+    assert int(expected_target, 16) < int(previous_target, 16)
+    assert candidate["header"]["target"] == expected_target
+    assert candidate["header"]["difficulty"] == 1
     store.close()
 
 
@@ -236,7 +263,35 @@ def test_auto_difficulty_decreases_when_blocks_are_slow(tmp_path: Path):
         assert accepted, message
 
     assert chain.height() == 3
-    assert chain.expected_difficulty(4) == 1
+    previous_target = chain.store.get_block_by_height(3)["target"]
+    assert int(chain.expected_target(4), 16) > int(previous_target, 16)
+    store.close()
+
+
+def test_adaptive_target_accelerates_after_repeated_fast_windows(tmp_path: Path):
+    config, store, chain, _mempool = make_stack(tmp_path)
+    config["difficulty_adjustment_interval"] = 3
+    config["target_block_seconds"] = 60
+    config["target_adjustment_base_bps"] = 1000
+    miner = generate_wallet("miner")
+    store.save_wallet(miner)
+    start = int(time.time()) - 600
+
+    for offset in range(3):
+        block, _block_hash = mine_block(chain, miner.address, timestamp=start + offset)
+        assert chain.add_block(block, source="test")[0]
+    base_target = int(store.get_block_by_height(3)["target"], 16)
+    first_target = int(chain.expected_target(4), 16)
+
+    for offset in range(3, 6):
+        block, _block_hash = mine_block(chain, miner.address, timestamp=start + offset)
+        assert chain.add_block(block, source="test")[0]
+    second_target = int(chain.expected_target(7), 16)
+    policy = chain.difficulty_policy()
+
+    assert base_target - first_target < first_target - second_target
+    assert policy["momentum_streak"] == 2
+    assert policy["momentum_adjustment_bps"] == 2000
     store.close()
 
 
@@ -255,17 +310,17 @@ def test_block_rejects_wrong_auto_adjusted_difficulty(tmp_path: Path):
         assert accepted, message
 
     wrong = chain.create_candidate_block(miner.address, [])
-    wrong["header"]["difficulty"] = 1
+    wrong["header"]["target"] = difficulty_to_target(1)
     nonce = 0
     while True:
         wrong["header"]["nonce"] = nonce
-        if hash_meets_difficulty(compute_block_hash(wrong), wrong["header"]["difficulty"]):
+        if block_meets_work(wrong, compute_block_hash(wrong)):
             break
         nonce += 1
 
     accepted, reason = chain.add_block(wrong, source="test")
     assert not accepted
-    assert "difficulty mismatch" in reason
+    assert "target mismatch" in reason
     store.close()
 
 
@@ -280,7 +335,7 @@ def test_mempool_rejects_overspend_and_sorts_fees(tmp_path: Path):
     nonce = 0
     while True:
         reward_block["header"]["nonce"] = nonce
-        if hash_meets_difficulty(compute_block_hash(reward_block), reward_block["header"]["difficulty"]):
+        if block_meets_work(reward_block, compute_block_hash(reward_block)):
             break
         nonce += 1
     accepted, message = chain.add_block(reward_block, source="test")
@@ -332,7 +387,7 @@ def test_reset_to_genesis_keeps_wallet_and_clears_chain_data(tmp_path: Path):
     nonce = 0
     while True:
         reward_block["header"]["nonce"] = nonce
-        if hash_meets_difficulty(compute_block_hash(reward_block), reward_block["header"]["difficulty"]):
+        if block_meets_work(reward_block, compute_block_hash(reward_block)):
             break
         nonce += 1
     accepted, message = chain.add_block(reward_block, source="test")
@@ -448,5 +503,24 @@ def test_service_set_difficulty_persists_to_config(tmp_path: Path):
     assert service.blockchain.expected_difficulty() == 8
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["difficulty"] == 8
+
+    asyncio.run(service.shutdown())
+
+
+def test_service_set_target_prefix_persists_to_config(tmp_path: Path):
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config["storage"]["path"] = str(tmp_path / "node.db")
+    config_path = tmp_path / "node.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    config["_config_path"] = str(config_path)
+    config["_config_dir"] = str(tmp_path)
+
+    service = NodeService(config)
+    result = asyncio.run(service.set_target_prefix("000b"))
+
+    assert result["target_prefix"] == "000b"
+    assert service.blockchain.expected_target().startswith("000b")
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["initial_target_prefix"] == "000b"
 
     asyncio.run(service.shutdown())
