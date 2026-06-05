@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 
 import uvicorn
 
@@ -13,6 +15,18 @@ from app.config import (
 )
 from app.runtime import NodeService
 from app.web.api import create_web_app
+
+_DEVNULL_STREAMS = []
+
+
+def ensure_stdio() -> None:
+    """PyInstaller --noconsole can leave stdio as None; uvicorn expects streams."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        _DEVNULL_STREAMS.append(sys.stdout)
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        _DEVNULL_STREAMS.append(sys.stderr)
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +41,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    ensure_stdio()
     args = parse_args()
     config = load_config(args.config)
     if args.node_name:
