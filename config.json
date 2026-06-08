@@ -22,7 +22,7 @@
   "mempool_max_bytes": 314572800,
   "sync_interval_seconds": 10,
   "servers": [
-    ["localhost",7465]
+    ["localhost",7464]
   ],
   "storage": {
     "type": "sqlite",
