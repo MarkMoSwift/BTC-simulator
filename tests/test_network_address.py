@@ -218,3 +218,42 @@ def test_invalid_peer_block_records_security_event(tmp_path):
     assert event["block_hash"]
     assert event["reason"]
     asyncio.run(service.shutdown())
+
+
+def test_peer_connection_reset_is_handled_without_task_exception(tmp_path, monkeypatch):
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config["servers"] = []
+    config["storage"]["path"] = str(tmp_path / "reset-peer.db")
+    service = NodeService(config)
+
+    async def fake_read_json(_reader):
+        raise ConnectionResetError(64, "test reset")
+
+    class FakeWriter:
+        def write(self, _payload):
+            pass
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    monkeypatch.setattr("app.network.node.read_json", fake_read_json)
+
+    asyncio.run(
+        service.p2p._connection_loop(
+            reader=object(),
+            writer=FakeWriter(),
+            ip="192.168.1.70",
+            port=7464,
+            direction="outbound",
+        )
+    )
+
+    peers = service.store.list_peers()
+    assert peers[0]["ip"] == "192.168.1.70"
+    asyncio.run(service.shutdown())

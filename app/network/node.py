@@ -241,8 +241,10 @@ class P2PNode:
                 if message is None:
                     break
                 await self._handle_message(conn, message)
-        except (asyncio.CancelledError, ConnectionError):
+        except asyncio.CancelledError:
             raise
+        except ConnectionError as exc:
+            self.log(f"Peer disconnected {conn.key}: {exc}")
         except Exception as exc:
             self.log(f"Peer error {conn.key}: {exc}")
         finally:
