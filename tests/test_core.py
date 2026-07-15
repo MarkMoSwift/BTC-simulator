@@ -51,6 +51,16 @@ def mine_block(chain: Blockchain, miner_address: str, timestamp: int | None = No
         nonce += 1
 
 
+def mine_existing_block(block: dict) -> str:
+    nonce = 0
+    while True:
+        block["header"]["nonce"] = nonce
+        block_hash = compute_block_hash(block)
+        if block_meets_work(block, block_hash):
+            return block_hash
+        nonce += 1
+
+
 def test_wallet_signature_and_tx_id(tmp_path: Path):
     _config, _store, _chain, _mempool = make_stack(tmp_path)
     sender = generate_wallet("sender")
@@ -103,6 +113,49 @@ def test_mining_reward_and_balance(tmp_path: Path):
     assert chain.height() == 1
     assert chain.get_balance(miner.address) == 50.0
 
+    store.close()
+
+
+def test_block_rejects_reused_coinbase_transaction(tmp_path: Path):
+    _config, store, chain, _mempool = make_stack(tmp_path)
+    miner = generate_wallet("miner")
+    store.save_wallet(miner)
+
+    first, _first_hash = mine_block(chain, miner.address)
+    assert chain.add_block(first, source="test")[0]
+
+    duplicate = chain.create_candidate_block(miner.address, [])
+    duplicate["transactions"][0] = copy.deepcopy(first["transactions"][0])
+    duplicate["header"]["merkle_root"] = first["header"]["merkle_root"]
+    mine_existing_block(duplicate)
+
+    accepted, reason = chain.add_block(duplicate, source="test")
+
+    assert not accepted
+    assert "coinbase transaction already confirmed" in reason
+    assert chain.height() == 1
+    assert chain.get_balance(miner.address) == 50.0
+    store.close()
+
+
+def test_replacement_chain_rejects_reused_coinbase_transaction(tmp_path: Path):
+    _config, store, chain, _mempool = make_stack(tmp_path)
+    miner = generate_wallet("miner")
+    store.save_wallet(miner)
+
+    first, first_hash = mine_block(chain, miner.address)
+    duplicate = chain.create_candidate_block(miner.address, [])
+    duplicate["header"]["prev_hash"] = first_hash
+    duplicate["transactions"][0] = copy.deepcopy(first["transactions"][0])
+    duplicate["header"]["merkle_root"] = first["header"]["merkle_root"]
+    mine_existing_block(duplicate)
+
+    genesis = store.get_blocks_from_height(0)[0]
+    accepted, reason = chain.replace_with_chain([genesis, first, duplicate], source="test")
+
+    assert not accepted
+    assert "duplicate transaction in replacement chain" in reason
+    assert chain.height() == 0
     store.close()
 
 

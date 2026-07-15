@@ -323,6 +323,8 @@ class Blockchain:
 
         coinbase = transactions[0]
         validate_coinbase_shape(coinbase)
+        if self.store.is_tx_confirmed(coinbase["tx_id"]):
+            raise ValueError(f"coinbase transaction already confirmed: {coinbase['tx_id']}")
 
         seen_tx_ids: set[str] = set()
         temp_balances: dict[str, float] = {}
@@ -420,6 +422,11 @@ class Blockchain:
                 raise ValueError(f"block {height} must have exactly one first-position coinbase")
             coinbase = transactions[0]
             validate_coinbase_shape(coinbase)
+            if coinbase["tx_id"] in seen_tx_ids:
+                raise ValueError(
+                    f"duplicate transaction in replacement chain: {coinbase['tx_id']}"
+                )
+            seen_tx_ids.add(coinbase["tx_id"])
 
             total_fees = 0.0
             balance_delta: dict[str, float] = {}
@@ -443,7 +450,6 @@ class Blockchain:
             expected_coinbase = round(self.mining_reward + total_fees, 8)
             if not math.isclose(float(coinbase["amount"]), expected_coinbase, abs_tol=1e-8):
                 raise ValueError(f"block {height} coinbase amount is invalid")
-            seen_tx_ids.add(coinbase["tx_id"])
             balance_delta[coinbase["receiver"]] = round(
                 balance_delta.get(coinbase["receiver"], 0.0) + float(coinbase["amount"]),
                 8,
