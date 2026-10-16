@@ -275,6 +275,16 @@ code,
   gap: 8px;
 }
 
+.subhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 4px;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  border-top: 1px solid var(--line);
+}
+
 /* ---------- 按钮与标签 ---------- */
 
 .primary,
@@ -450,7 +460,8 @@ code,
   color: var(--ink-soft);
 }
 
-input {
+input,
+select {
   width: 100%;
   padding: 8px 10px;
   font: inherit;
@@ -461,7 +472,8 @@ input {
   border-radius: var(--radius);
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: 2px solid rgba(224, 123, 18, 0.35);
   outline-offset: 1px;
   border-color: var(--accent);
@@ -469,6 +481,11 @@ input:focus {
 
 .price-input {
   width: 92px;
+  flex: none;
+}
+
+.duration-select {
+  width: auto;
   flex: none;
 }
 
@@ -516,6 +533,32 @@ input:focus {
 
 .row-item .grow .muted {
   font-size: 0.78rem;
+}
+
+.row-item-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.row-head,
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.row-actions {
+  justify-content: flex-end;
+}
+
+.row-actions .price-input {
+  width: 96px;
+}
+
+.auction-timer {
+  font-variant-numeric: tabular-nums;
 }
 
 .grow {
@@ -1144,7 +1187,7 @@ body.screen {
 
 .screen-foot {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 20px;
   padding: 0 28px 24px;
 }

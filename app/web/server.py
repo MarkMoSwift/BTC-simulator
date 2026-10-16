@@ -183,7 +183,9 @@ def create_app(service: ClassroomService) -> FastAPI:
 
     @app.post("/api/transactions")
     async def submit_transaction(body: TransactionBody, token: str = Depends(student_token)) -> dict[str, Any]:
-        service.student(token)
+        player = service.student(token)
+        if body.tx.get("sender") != player["address"]:
+            raise ClassroomError("只能提交自己签名的交易")
         return service.submit_transaction(body.tx)
 
     @app.post("/api/mining/job")

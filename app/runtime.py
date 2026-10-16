@@ -244,6 +244,7 @@ class ClassroomService:
             "leaderboard": self.leaderboard(now),
             "packets": self.packets_view(now),
             "market": self.market_view()["listings"],
+            "auctions": self.auctions_view(now),
             "online": sum(
                 1
                 for player in self.store.list_players()
@@ -335,6 +336,10 @@ class ClassroomService:
 
     def _nft_view(self, nft: dict[str, Any]) -> dict[str, Any]:
         listing = self.chain.state.listings.get(nft["token_id"])
+        auction = next(
+            (item for item in self.chain.state.auctions.values() if item["token_id"] == nft["token_id"]),
+            None,
+        )
         return {
             "token_id": nft["token_id"],
             "name": nft["name"],
@@ -343,6 +348,42 @@ class ClassroomService:
             "created_at": nft["created_at"],
             "mint_height": nft["mint_height"],
             "price": int(listing["price"]) if listing else None,
+            "auction_id": auction["auction_id"] if auction else None,
+        }
+
+    def auctions_view(self, now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        names = self.nicknames()
+        active = [self._auction_view(auction, names, now) for auction in self.chain.state.auctions.values()]
+        active.sort(key=lambda item: item["ends_at"])
+        history = [
+            {
+                **record,
+                "seller_name": names.get(record["seller"], "未知"),
+                "winner_name": names.get(record["winner"], "") if record["winner"] else "",
+            }
+            for record in reversed(self.chain.state.auction_history)
+        ]
+        return {"active": active[:50], "history": history[:50]}
+
+    def _auction_view(self, auction: dict[str, Any], names: dict[str, str], now: float) -> dict[str, Any]:
+        nft = self.chain.state.nfts.get(auction["token_id"])
+        highest = int(auction["highest_bid"]) if auction["highest_bid"] else None
+        return {
+            "auction_id": auction["auction_id"],
+            "token_id": auction["token_id"],
+            "name": nft["name"] if nft else "未知藏品",
+            "seller": auction["seller"],
+            "seller_name": names.get(auction["seller"], "未知"),
+            "reserve_price": int(auction["reserve_price"]),
+            "minimum_bid": self.chain.state.minimum_bid(auction),
+            "highest_bid": highest,
+            "highest_bidder": auction["highest_bidder"],
+            "highest_bidder_name": names.get(auction["highest_bidder"], "") if auction["highest_bidder"] else "",
+            "bid_count": int(auction["bid_count"]),
+            "created_at": int(auction["created_at"]),
+            "ends_at": int(auction["ends_at"]),
+            "seconds_left": max(int(auction["ends_at"]) - int(now), 0),
         }
 
     def _packet_view(self, packet: dict[str, Any], now: float) -> dict[str, Any]:

@@ -7,13 +7,25 @@ from typing import Any, Callable
 
 from app.config import ChainSettings
 from app.core.redpacket import PacketError, amount_for_index
-from app.core.transaction import COINBASE, validate_coinbase, validate_signed_tx
+from app.core.transaction import (
+    COINBASE,
+    FEE_FREE_TX_TYPES,
+    validate_coinbase,
+    validate_signed_tx,
+)
+from app.units import format_coins
 
 LogFn = Callable[[str], None]
 
 
 class RuleError(ValueError):
     """交易违反链上规则（余额不足、重复领取、已售出等）。"""
+
+
+MIN_BID_PERCENT = 110
+SNIPE_EXTENSION_WINDOW = 30
+SNIPE_EXTENSION_SECONDS = 30
+AUCTION_HISTORY_LIMIT = 200
 
 
 @dataclass(frozen=True)
@@ -35,6 +47,8 @@ class ChainState:
         self.mining_income: dict[str, int] = {}
         self.nfts: dict[str, dict[str, Any]] = {}
         self.listings: dict[str, dict[str, Any]] = {}
+        self.auctions: dict[str, dict[str, Any]] = {}
+        self.auction_history: list[dict[str, Any]] = []
         self.packets: dict[str, dict[str, Any]] = {}
         self.seen_tx_ids: set[str] = set()
 
@@ -86,11 +100,12 @@ class ChainState:
             validate_signed_tx(tx)
         if tx["tx_id"] in self.seen_tx_ids:
             raise RuleError("这笔交易已经上链，不能重复执行")
-        fee = int(tx["fee"])
-        if fee < self.settings.min_fee_sat or fee > self.settings.max_fee_sat:
-            raise RuleError(
-                f"手续费必须在 {self.settings.min_fee_sat} 到 {self.settings.max_fee_sat} 聪之间"
-            )
+        if tx_type not in FEE_FREE_TX_TYPES:
+            fee = int(tx["fee"])
+            if fee < self.settings.min_fee_sat or fee > self.settings.max_fee_sat:
+                raise RuleError(
+                    f"手续费必须在 {self.settings.min_fee_sat} 到 {self.settings.max_fee_sat} 聪之间"
+                )
 
         handler = getattr(self, f"_apply_{tx_type}")
         index = handler(tx, clock, height if height is not None else self.height + 1)
@@ -120,6 +135,8 @@ class ChainState:
 
     def _apply_nft_list(self, tx: dict[str, Any], _clock: int, _height: int) -> TransactionIndex:
         nft = self._require_nft_owner(tx["token_id"], tx["sender"])
+        if self._auction_of(tx["token_id"]):
+            raise RuleError("这件藏品正在拍卖，先结束拍卖")
         self._spend(tx["sender"], tx["fee"])
         self.listings[tx["token_id"]] = {
             "token_id": nft["token_id"],
@@ -153,6 +170,81 @@ class ChainState:
         del self.listings[tx["token_id"]]
         return TransactionIndex(
             frozenset((tx["sender"], listing["seller"])), listing["seller"], price
+        )
+
+    def _apply_nft_auction_create(self, tx: dict[str, Any], clock: int, _height: int) -> TransactionIndex:
+        nft = self._require_nft_owner(tx["token_id"], tx["sender"])
+        if tx["token_id"] in self.listings:
+            raise RuleError("这件藏品已经挂在市场上，先下架再拍卖")
+        if self._auction_of(tx["token_id"]):
+            raise RuleError("这件藏品已经在拍卖")
+        self._spend(tx["sender"], tx["fee"])
+        # 拍卖窗口按上链时刻计时，卖家设备的时钟偏差不会影响成交。
+        self.auctions[tx["tx_id"]] = {
+            "auction_id": tx["tx_id"],
+            "token_id": nft["token_id"],
+            "seller": tx["sender"],
+            "reserve_price": int(tx["reserve_price"]),
+            "ends_at": clock + int(tx["duration"]),
+            "highest_bid": None,
+            "highest_bidder": None,
+            "bid_count": 0,
+            "created_at": clock,
+        }
+        return TransactionIndex(frozenset((tx["sender"],)), None, 0)
+
+    def _apply_nft_auction_cancel(self, tx: dict[str, Any], clock: int, _height: int) -> TransactionIndex:
+        auction = self._require_auction(tx["auction_id"], tx["sender"])
+        if auction["highest_bid"] is not None:
+            raise RuleError("已经有人出价，拍卖照常成交，不能取消")
+        self._spend(tx["sender"], tx["fee"])
+        self._record_auction(auction, "cancelled", clock)
+        del self.auctions[tx["auction_id"]]
+        return TransactionIndex(frozenset((tx["sender"],)), None, 0)
+
+    def _apply_nft_bid(self, tx: dict[str, Any], clock: int, _height: int) -> TransactionIndex:
+        auction = self._require_auction(tx["auction_id"])
+        if clock >= auction["ends_at"]:
+            raise RuleError("拍卖已经结束了")
+        if tx["sender"] == auction["seller"]:
+            raise RuleError("卖家不能给自己的藏品出价")
+        if tx["sender"] == auction["highest_bidder"]:
+            raise RuleError("你已经是当前最高价，等别人出价")
+        amount = int(tx["amount"])
+        if amount < self.minimum_bid(auction):
+            if auction["highest_bid"] is None:
+                raise RuleError(f"起拍价是 {format_coins(auction['reserve_price'])} 币")
+            raise RuleError(f"出价至少要比当前最高价高 {MIN_BID_PERCENT - 100}%")
+        # 出价即锁定：钱先押在这场拍卖里，被更高价超过时自动退回。
+        self._spend(tx["sender"], amount + tx["fee"])
+        if auction["highest_bid"] is not None:
+            previous = auction["highest_bidder"]
+            self.balances[previous] = self.balance_of(previous) + int(auction["highest_bid"])
+        auction["highest_bid"] = amount
+        auction["highest_bidder"] = tx["sender"]
+        auction["bid_count"] = int(auction["bid_count"]) + 1
+        if clock >= auction["ends_at"] - SNIPE_EXTENSION_WINDOW:
+            auction["ends_at"] = clock + SNIPE_EXTENSION_SECONDS
+        return TransactionIndex(frozenset((tx["sender"],)), None, amount)
+
+    def _apply_nft_auction_settle(self, tx: dict[str, Any], clock: int, _height: int) -> TransactionIndex:
+        auction = self._require_auction(tx["auction_id"])
+        winner = auction["highest_bidder"]
+        if winner is None:
+            raise RuleError("没有人出价，卖家取消拍卖就能收回藏品")
+        if clock < auction["ends_at"]:
+            raise RuleError("拍卖还在进行中")
+        nft = self.nfts.get(auction["token_id"])
+        if not nft or nft["owner"] != auction["seller"]:
+            raise RuleError("拍卖的藏品已经不在卖家手里")
+        amount = int(auction["highest_bid"])
+        # 出价时钱已经扣下来了，结算只是把它交给卖家并过户藏品。
+        self.balances[auction["seller"]] = self.balance_of(auction["seller"]) + amount
+        nft["owner"] = winner
+        self._record_auction(auction, "sold", clock, winner=winner, amount=amount)
+        del self.auctions[tx["auction_id"]]
+        return TransactionIndex(
+            frozenset((tx["sender"], winner, auction["seller"])), winner, amount
         )
 
     def _apply_packet_create(self, tx: dict[str, Any], _clock: int, _height: int) -> TransactionIndex:
@@ -242,3 +334,44 @@ class ChainState:
         if nft["owner"] != owner:
             raise RuleError("你不是这件藏品的持有人")
         return nft
+
+    def _require_auction(self, auction_id: str, seller: str | None = None) -> dict[str, Any]:
+        auction = self.auctions.get(auction_id)
+        if not auction:
+            raise RuleError("拍卖不存在或已经结束")
+        if seller is not None and auction["seller"] != seller:
+            raise RuleError("这场拍卖不是由你发起的")
+        return auction
+
+    def _auction_of(self, token_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.auctions.values() if item["token_id"] == token_id), None)
+
+    def minimum_bid(self, auction: dict[str, Any]) -> int:
+        """首次出价就是起拍价，之后每次至少加价 10%。"""
+        reserve = int(auction["reserve_price"])
+        if auction["highest_bid"] is None:
+            return reserve
+        return -(-int(auction["highest_bid"]) * MIN_BID_PERCENT // 100)
+
+    def _record_auction(
+        self,
+        auction: dict[str, Any],
+        outcome: str,
+        clock: int,
+        *,
+        winner: str | None = None,
+        amount: int = 0,
+    ) -> None:
+        self.auction_history.append(
+            {
+                "auction_id": auction["auction_id"],
+                "token_id": auction["token_id"],
+                "seller": auction["seller"],
+                "winner": winner,
+                "amount": int(amount),
+                "bid_count": int(auction["bid_count"]),
+                "outcome": outcome,
+                "closed_at": clock,
+            }
+        )
+        del self.auction_history[:-AUCTION_HISTORY_LIMIT]

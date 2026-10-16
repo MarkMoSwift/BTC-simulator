@@ -179,6 +179,75 @@ def test_nft_market_flow(tmp_path) -> None:
         assert sale["receiver"] == alice.address
 
 
+def test_nft_auction_flow(tmp_path) -> None:
+    client, service = bootstrap(tmp_path)
+    with client:
+        alice, alice_headers = login(client, "alice")
+        bob, bob_headers = login(client, "bob")
+        carol, carol_headers = login(client, "carol")
+        for headers in (alice_headers, bob_headers, carol_headers):
+            mine_a_block(client, service, headers)
+
+        mint = signed_tx(alice, "nft_mint", name="课堂徽章", seed="0123456789abcdef", fee=10_000)
+        client.post("/api/transactions", headers=alice_headers, json={"tx": mint})
+        mine_pending(client, service, alice_headers)
+
+        auction = signed_tx(
+            alice,
+            "nft_auction_create",
+            token_id=mint["tx_id"],
+            reserve_price=2 * COIN,
+            duration=300,
+            fee=10_000,
+        )
+        client.post("/api/transactions", headers=alice_headers, json={"tx": auction})
+        mine_pending(client, service, alice_headers)
+        assert client.get("/api/me", headers=alice_headers).json()["nfts"][0]["auction_id"] == auction["tx_id"]
+
+        def place_bid(player, headers, amount: int):
+            bid = signed_tx(player, "nft_bid", auction_id=auction["tx_id"], amount=amount, fee=10_000)
+            response = client.post("/api/transactions", headers=headers, json={"tx": bid})
+            assert response.status_code == 200, response.text
+            return bid
+
+        too_low = client.post(
+            "/api/transactions",
+            headers=carol_headers,
+            json={"tx": signed_tx(carol, "nft_bid", auction_id=auction["tx_id"], amount=COIN, fee=10_000)},
+        )
+        assert too_low.status_code == 400
+        assert "起拍价" in too_low.json()["detail"]
+
+        bob_balance = client.get("/api/me", headers=bob_headers).json()["balance"]
+        place_bid(bob, bob_headers, 2 * COIN)
+        place_bid(carol, carol_headers, 3 * COIN)
+        mine_pending(client, service, alice_headers)
+
+        live = client.get("/api/public").json()
+        active = live["auctions"]["active"][0]
+        assert active["highest_bid"] == 3 * COIN
+        assert active["highest_bidder"] == carol.address
+        assert active["seconds_left"] > 0
+        # 被超价的钱原路退回，只花掉一次手续费。
+        assert client.get("/api/me", headers=bob_headers).json()["balance"] == bob_balance - 10_000
+
+        service.chain.state.auctions[auction["tx_id"]]["ends_at"] = int(time.time()) - 300
+        settlement = signed_tx(alice, "nft_auction_settle", auction_id=auction["tx_id"], fee=0)
+        settled = client.post("/api/transactions", headers=alice_headers, json={"tx": settlement})
+        assert settled.status_code == 200, settled.text
+        mine_pending(client, service, carol_headers)
+
+        assert client.get("/api/me", headers=carol_headers).json()["nfts"][0]["token_id"] == mint["tx_id"]
+        seller_rows = client.get("/api/me", headers=alice_headers).json()["transactions"]
+        payout = next(row for row in seller_rows if row["tx_id"] == settlement["tx_id"])
+        assert payout["amount"] == 3 * COIN
+        assert payout["receiver"] == carol.address
+        closed = client.get("/api/public").json()["auctions"]
+        assert closed["active"] == []
+        assert closed["history"][0]["outcome"] == "sold"
+        assert closed["history"][0]["winner"] == carol.address
+
+
 def test_teacher_controls(tmp_path) -> None:
     client, service = bootstrap(tmp_path)
     with client:

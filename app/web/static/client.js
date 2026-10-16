@@ -101,6 +101,15 @@
     return minutes > 0 ? `${minutes} 分 ${total % 60} 秒` : `${total} 秒`;
   }
 
+  function formatCountdown(seconds) {
+    const total = Math.max(Math.floor(Number(seconds) || 0), 0);
+    return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  }
+
+  function auctionPrice(auction) {
+    return auction.highest_bid === null ? auction.reserve_price : auction.highest_bid;
+  }
+
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, (character) => ({
       "&": "&amp;",
@@ -211,6 +220,8 @@
     formatHashrate,
     formatTime,
     formatDuration,
+    formatCountdown,
+    auctionPrice,
     escapeHtml,
     shortAddress,
     notify,

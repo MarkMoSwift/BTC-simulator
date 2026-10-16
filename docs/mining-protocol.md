@@ -226,11 +226,59 @@ Content-Type: application/json
 | 登录状态已过期 | 令牌超过 12 小时，重新登录 |
 | 这个昵称已被教师停用 | 教师停用了账号 |
 
-## 8. 其它只读接口
+## 8. 自己发起交易
+
+学生端能点的每一个按钮都是一笔签名交易，接口只有一个：
+
+```http
+POST $BASE/api/transactions
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"tx": {"…交易体…"}}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `type` | 交易类型，见下表 |
+| `sender` | 你的地址 |
+| `timestamp` | 发起时间（秒），和服务器时间差太多会被拒收 |
+| `public_key` | 你的公钥，必须和 `sender` 匹配 |
+| `fee` | 手续费（聪），一般不低于课堂设置的 `min_fee_sat` |
+
+`tx_id` 是交易体（不含 `tx_id` 和 `signature`）规范 JSON 的 `sha256d`，签名也对这份规范
+JSON 做 ECDSA。规范 JSON 指按键排序、无空格、非 ASCII 一律转义的文本，实现见
+`app/utils/canonical.py`。
+
+| 类型 | 额外字段 |
+| --- | --- |
+| `transfer` | `receiver`、`amount`，可选 `note` |
+| `packet_create` | `total`、`count`，可选 `note` |
+| `packet_claim` | `packet_id`、`index` |
+| `packet_refund` | `packet_id` |
+| `nft_mint` | `name`、`seed`（16 位十六进制） |
+| `nft_list` | `token_id`、`price` |
+| `nft_unlist` | `token_id` |
+| `nft_buy` | `token_id` |
+| `nft_auction_create` | `token_id`、`reserve_price`、`duration`（秒，1-600） |
+| `nft_bid` | `auction_id`、`amount` |
+| `nft_auction_cancel` | `auction_id` |
+| `nft_auction_settle` | `auction_id`，手续费必须填 `0` |
+
+### 藏品拍卖的规则
+
+1. 开拍交易上链那一刻开始计时，`duration` 秒内接受出价。
+2. 第一次出价不能低于 `reserve_price`，之后每次至少比当前最高价高 10%。
+3. 出价即托管：钱在出价时就从余额扣走，被别人超过时自动原路退回，手续费不退。
+4. 结束前 30 秒内有人出价，结束时间顺延到出价后 30 秒，卡点偷袭拿不到便宜。
+5. 到点后任何人发一笔 `nft_auction_settle` 都能结算：托管的钱付给卖家，藏品过户给最高出价者。
+6. 没人出价时卖家可以 `nft_auction_cancel` 收回藏品，有人出价后就不能取消。
+
+## 9. 其它只读接口
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /api/public` | 课堂快照：高度、难度、排行榜、红包、市场 |
+| `GET /api/public` | 课堂快照：高度、难度、排行榜、红包、市场与拍卖 |
 | `GET /api/blocks?limit=20` | 最近区块列表 |
 | `GET /api/blocks/{高度或哈希}` | 区块明细（含全部交易） |
 | `GET /api/transactions/{tx_id}` | 交易明细，未确认时返回 `pending` |
@@ -240,3 +288,9 @@ Content-Type: application/json
 | `WS /ws?token=…` | 实时推送：`tick`、`share`、`block`、`announcement` 等 |
 
 实时推送每秒一条 `tick`，内容与 `/api/public` 相同，适合做自己的看板。
+
+`auctions` 字段分两部分：`active` 是进行中的拍卖（`auction_id`、`token_id`、`name`、
+`seller`、`reserve_price`、`minimum_bid`、`highest_bid`、`highest_bidder`、`bid_count`、
+`ends_at`、`seconds_left`）；`history` 是已结束的拍卖（`outcome` 为 `sold` 或
+`cancelled`，成交时还有 `winner`、`amount`、`closed_at`）。`/api/me` 里每件藏品带
+`auction_id`，不为 `null` 就说明这件藏品正在拍卖。

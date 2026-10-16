@@ -1,10 +1,10 @@
-/* 课堂投影大屏：两块排行榜 + 榜单底部的区块、红包、藏品动态。
+/* 课堂投影大屏：两块排行榜 + 榜单底部的区块、红包、市场与拍卖动态。
 
    大屏只读，用匿名 WebSocket 接收服务端每秒推送的课堂快照。 */
 (function () {
   "use strict";
 
-  const { Feed, formatCoins, formatHashrate, formatTime, escapeHtml, shortAddress, notify } = window.Sim;
+  const { Feed, formatCoins, formatHashrate, formatTime, formatCountdown, auctionPrice, escapeHtml, shortAddress, notify } = window.Sim;
 
   const BOARD_ROWS = 10;
   const STRIP_ROWS = 4;
@@ -66,6 +66,7 @@
     $("hashrate-note").textContent = `${tick.leaderboard.rows.length} 位同学在场`;
     renderPackets(tick.packets.active);
     renderMarket(tick.market);
+    renderAuctions(tick.auctions.active);
     renderBlocks();
     renderAnnouncement(tick.announcement);
   }
@@ -191,6 +192,19 @@
       </li>`,
     );
     $("strip-market").innerHTML = rows.join("") || `<li class="strip-empty">市场上还没有挂单的藏品</li>`;
+  }
+
+  function renderAuctions(auctions) {
+    const rows = auctions.slice(0, STRIP_ROWS).map(
+      (auction) => `<li>
+        <strong>${escapeHtml(auction.name)}</strong>
+        <span>${formatCoins(auctionPrice(auction), 2)} 币</span>
+        <span class="strip-muted">${
+          auction.seconds_left > 0 ? `剩 ${formatCountdown(auction.seconds_left)}` : "等待结算"
+        }</span>
+      </li>`,
+    );
+    $("strip-auctions").innerHTML = rows.join("") || `<li class="strip-empty">拍卖场还空着</li>`;
   }
 
   function renderAnnouncement(announcement) {

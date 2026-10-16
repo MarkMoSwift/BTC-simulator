@@ -5,7 +5,7 @@
 (function () {
   "use strict";
 
-  const { API, Feed, canonicalJson, formatCoins, parseCoins, formatHashrate, formatTime, escapeHtml, shortAddress, notify } = window.Sim;
+  const { API, Feed, canonicalJson, formatCoins, parseCoins, formatHashrate, formatTime, formatCountdown, auctionPrice, escapeHtml, shortAddress, notify } = window.Sim;
 
   const STORAGE_PRIVATE_KEY = "btc-sim.private-key";
   const STORAGE_NICKNAME = "btc-sim.nickname";
@@ -538,6 +538,46 @@
     }
   }
 
+  async function startAuction(tokenId, priceText, durationText) {
+    try {
+      await submitTransaction("nft_auction_create", {
+        token_id: tokenId,
+        reserve_price: parseCoins(priceText),
+        duration: Number(durationText),
+        fee: minFee(),
+      });
+      await refreshMe();
+    } catch (problem) {
+      notify(problem.message, "error");
+    }
+  }
+
+  async function placeBid(auctionId, priceText) {
+    try {
+      await submitTransaction("nft_bid", {
+        auction_id: auctionId,
+        amount: parseCoins(priceText),
+        fee: minFee(),
+      });
+      const input = $("auction-list").querySelector(`input[data-bid-price="${auctionId}"]`);
+      if (input) {
+        input.value = "";
+      }
+      await refreshMe();
+    } catch (problem) {
+      notify(problem.message, "error");
+    }
+  }
+
+  async function simpleAuctionAction(type, auctionId, fee) {
+    try {
+      await submitTransaction(type, { auction_id: auctionId, fee });
+      await refreshMe();
+    } catch (problem) {
+      notify(problem.message, "error");
+    }
+  }
+
   /* ---------- 渲染 ---------- */
 
   function renderLive() {
@@ -547,6 +587,7 @@
     renderLeaderboard();
     renderPackets();
     renderNfts();
+    renderAuctions();
     renderJob();
     if (!$("transfer-fee").value) {
       $("transfer-fee").value = formatCoins(minFee(), 8);
@@ -640,21 +681,52 @@
     if (!state.tick) {
       return;
     }
+    const auctions = state.tick.auctions.active;
     const mine = state.me ? state.me.nfts : [];
     const rows = mine.map((nft) => {
-      const listed = nft.price !== null;
-      const action = listed
-        ? `<span class="muted small">在售 ${formatCoins(nft.price)} 币</span>
-           <button type="button" class="ghost" data-action="unlist" data-token="${nft.token_id}">下架</button>`
-        : `<input class="price-input" type="text" inputmode="decimal" placeholder="价格" data-price="${nft.token_id}">
-           <button type="button" class="ghost" data-action="list" data-token="${nft.token_id}">上架</button>`;
-      return `<li class="row-item">
-        <span class="tag tag-blue">我的藏品</span>
-        <span class="grow">
-          <strong>${escapeHtml(nft.name)}</strong>
-          <span class="muted small">${nft.token_id.slice(0, 12)}… · 第 ${nft.mint_height} 块铸造</span>
-        </span>
-        ${action}
+      const auction = nft.auction_id ? auctions.find((item) => item.auction_id === nft.auction_id) : null;
+      if (auction) {
+        return `<li class="row-item">
+          <span class="tag tag-gold">拍卖中</span>
+          <span class="grow">
+            <strong>${escapeHtml(nft.name)}</strong>
+            <span class="muted small">当前价 ${formatCoins(auctionPrice(auction))} 币 · ${auction.bid_count} 次出价</span>
+          </span>
+          <span class="muted small">${
+            auction.highest_bid === null ? "还没有人出价" : `领先 ${escapeHtml(auction.highest_bidder_name)}`
+          }</span>
+        </li>`;
+      }
+      if (nft.price !== null) {
+        return `<li class="row-item">
+          <span class="tag tag-blue">我的藏品</span>
+          <span class="grow">
+            <strong>${escapeHtml(nft.name)}</strong>
+            <span class="muted small">在售 ${formatCoins(nft.price)} 币</span>
+          </span>
+          <button type="button" class="ghost" data-action="unlist" data-token="${nft.token_id}">下架</button>
+        </li>`;
+      }
+      return `<li class="row-item row-item-stack">
+        <div class="row-head">
+          <span class="tag tag-blue">我的藏品</span>
+          <span class="grow">
+            <strong>${escapeHtml(nft.name)}</strong>
+            <span class="muted small">${nft.token_id.slice(0, 12)}… · 第 ${nft.mint_height} 块铸造</span>
+          </span>
+        </div>
+        <div class="row-actions">
+          <input class="price-input" type="text" inputmode="decimal" placeholder="一口价" data-price="${nft.token_id}">
+          <button type="button" class="ghost" data-action="list" data-token="${nft.token_id}">上架</button>
+          <input class="price-input" type="text" inputmode="decimal" placeholder="起拍价" data-reserve="${nft.token_id}">
+          <select class="duration-select" data-duration="${nft.token_id}">
+            <option value="60">1 分钟</option>
+            <option value="180">3 分钟</option>
+            <option value="300" selected>5 分钟</option>
+            <option value="600">10 分钟</option>
+          </select>
+          <button type="button" class="ghost" data-action="auction" data-token="${nft.token_id}">开拍</button>
+        </div>
       </li>`;
     });
 
@@ -681,6 +753,107 @@
       renderedNftList = html;
       $("nft-list").innerHTML = html;
     }
+  }
+
+  function renderAuctions() {
+    if (!state.tick) {
+      return;
+    }
+    const list = $("auction-list");
+    const auctions = state.tick.auctions.active;
+    const keep = new Set();
+    for (const auction of auctions) {
+      keep.add(auction.auction_id);
+      let node = list.querySelector(`li[data-auction="${auction.auction_id}"]`);
+      if (!node) {
+        node = document.createElement("li");
+        node.className = "row-item row-item-stack";
+        node.dataset.auction = auction.auction_id;
+        list.appendChild(node);
+      }
+      paintAuction(node, auction);
+    }
+    for (const node of [...list.children]) {
+      if (node.dataset.auction && !keep.has(node.dataset.auction)) {
+        node.remove();
+      }
+    }
+    const empty = list.querySelector(".empty");
+    if (auctions.length && empty) {
+      empty.remove();
+    } else if (!auctions.length && !empty) {
+      list.innerHTML = `<li class="empty">拍卖场还空着，选一件藏品开拍试试</li>`;
+    }
+  }
+
+  /* 每秒重画整行会清掉学生正在输入的出价：行内容变了才重画，倒计时单独更新。 */
+  function paintAuction(node, auction) {
+    const shape = [
+      auction.name,
+      auction.seller,
+      auction.highest_bid,
+      auction.highest_bidder,
+      auction.bid_count,
+      auction.seconds_left > 0,
+      auction.seconds_left > 15,
+    ].join("|");
+    if (node.dataset.shape !== shape) {
+      const previous = node.querySelector("input[data-bid-price]");
+      const typed = previous ? previous.value : "";
+      node.dataset.shape = shape;
+      node.innerHTML = auctionRowHtml(auction);
+      const input = node.querySelector("input[data-bid-price]");
+      if (input && typed) {
+        input.value = typed;
+      }
+    }
+    const timer = node.querySelector(".auction-timer");
+    timer.textContent =
+      auction.seconds_left > 0 ? `剩余 ${formatCountdown(auction.seconds_left)}` : "已结束，等待结算";
+  }
+
+  function auctionRowHtml(auction) {
+    const mine = auction.seller === state.address;
+    const leading = auction.highest_bidder === state.address;
+    const ended = auction.seconds_left <= 0;
+    let action = `<input class="price-input" type="text" inputmode="decimal"
+        data-bid-price="${auction.auction_id}" placeholder="${formatCoins(auction.minimum_bid)}">
+      <button type="button" class="ghost" data-action="bid" data-auction="${auction.auction_id}">出价</button>`;
+    if (mine) {
+      action =
+        auction.highest_bid === null
+          ? `<button type="button" class="ghost" data-action="auction-cancel" data-auction="${auction.auction_id}">取消拍卖</button>`
+          : `<span class="muted small">等同学出更高价</span>`;
+    } else if (leading) {
+      action = `<span class="muted small">你已领先，等别人出价</span>`;
+    }
+    if (ended) {
+      action =
+        mine || leading
+          ? `<button type="button" class="primary" data-action="settle" data-auction="${auction.auction_id}">${
+              mine ? "收款交货" : "领取藏品"
+            }</button>`
+          : `<span class="muted small">等待结算</span>`;
+    }
+    const rush =
+      !mine && !leading && auction.seconds_left > 0 && auction.seconds_left <= 15
+        ? `<span class="muted small">最后 15 秒，出价可能赶不上打包</span>`
+        : "";
+    return `<div class="row-head">
+        <span class="tag tag-gold">拍卖</span>
+        <span class="grow">
+          <strong>${escapeHtml(auction.name)}</strong>
+          <span class="muted small">卖家 ${escapeHtml(auction.seller_name)} · 当前价 ${formatCoins(auctionPrice(auction))} 币 · ${
+            auction.bid_count
+          } 次出价</span>
+        </span>
+        <span class="auction-timer muted small"></span>
+      </div>
+      <div class="row-actions">
+        <span class="muted small">最低出价 ${formatCoins(auction.minimum_bid)} 币</span>
+        ${rush}
+        ${action}
+      </div>`;
   }
 
   function renderLeaderboard() {
@@ -744,6 +917,10 @@
       nft_list: "上架",
       nft_unlist: "下架",
       nft_buy: "购买",
+      nft_auction_create: "开拍",
+      nft_auction_cancel: "取消拍卖",
+      nft_auction_settle: "拍卖成交",
+      nft_bid: "拍卖出价",
       packet_create: "发红包",
       packet_claim: "领红包",
       packet_refund: "退红包",
@@ -793,10 +970,30 @@
       if (button.dataset.action === "list") {
         const input = $("nft-list").querySelector(`input[data-price="${tokenId}"]`);
         listNft(tokenId, input ? input.value : "");
+      } else if (button.dataset.action === "auction") {
+        const input = $("nft-list").querySelector(`input[data-reserve="${tokenId}"]`);
+        const duration = $("nft-list").querySelector(`select[data-duration="${tokenId}"]`);
+        startAuction(tokenId, input ? input.value : "", duration ? duration.value : "300");
       } else if (button.dataset.action === "unlist") {
         simpleNftAction("nft_unlist", tokenId);
       } else if (button.dataset.action === "buy") {
         simpleNftAction("nft_buy", tokenId);
+      }
+    });
+
+    $("auction-list").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) {
+        return;
+      }
+      const auctionId = button.dataset.auction;
+      if (button.dataset.action === "bid") {
+        const input = $("auction-list").querySelector(`input[data-bid-price="${auctionId}"]`);
+        placeBid(auctionId, input ? input.value : "");
+      } else if (button.dataset.action === "auction-cancel") {
+        simpleAuctionAction("nft_auction_cancel", auctionId, minFee());
+      } else if (button.dataset.action === "settle") {
+        simpleAuctionAction("nft_auction_settle", auctionId, 0);
       }
     });
   }

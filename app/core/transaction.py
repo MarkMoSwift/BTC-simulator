@@ -13,11 +13,16 @@ SIGNED_TX_TYPES = (
     "nft_list",
     "nft_unlist",
     "nft_buy",
+    "nft_auction_create",
+    "nft_auction_cancel",
+    "nft_auction_settle",
+    "nft_bid",
     "packet_create",
     "packet_claim",
     "packet_refund",
 )
 COINBASE = "coinbase"
+FEE_FREE_TX_TYPES = ("nft_auction_settle",)
 
 _OPTIONAL_FIELDS = {"note"}
 _REQUIRED_FIELDS: dict[str, set[str]] = {
@@ -26,6 +31,19 @@ _REQUIRED_FIELDS: dict[str, set[str]] = {
     "nft_list": {"type", "sender", "token_id", "price", "fee", "timestamp", "public_key"},
     "nft_unlist": {"type", "sender", "token_id", "fee", "timestamp", "public_key"},
     "nft_buy": {"type", "sender", "token_id", "fee", "timestamp", "public_key"},
+    "nft_auction_create": {
+        "type",
+        "sender",
+        "token_id",
+        "reserve_price",
+        "duration",
+        "fee",
+        "timestamp",
+        "public_key",
+    },
+    "nft_auction_cancel": {"type", "sender", "auction_id", "fee", "timestamp", "public_key"},
+    "nft_auction_settle": {"type", "sender", "auction_id", "fee", "timestamp", "public_key"},
+    "nft_bid": {"type", "sender", "auction_id", "amount", "fee", "timestamp", "public_key"},
     "packet_create": {"type", "sender", "total", "count", "fee", "timestamp", "public_key"},
     "packet_claim": {"type", "sender", "packet_id", "index", "fee", "timestamp", "public_key"},
     "packet_refund": {"type", "sender", "packet_id", "fee", "timestamp", "public_key"},
@@ -35,6 +53,7 @@ _NOTE_TYPES = {"transfer", "packet_create"}
 MAX_NAME_LENGTH = 16
 MAX_NOTE_LENGTH = 40
 MAX_AMOUNT_SAT = 100_000_000 * 1_000_000
+MAX_AUCTION_SECONDS = 600
 
 
 class TxError(ValueError):
@@ -113,6 +132,8 @@ def _validate_fields(tx: dict[str, Any], tx_type: str) -> None:
     if missing:
         raise TxError(f"{tx_type} 缺字段：{', '.join(sorted(missing))}")
     _require_int(tx, "timestamp", 0, 10**12)
+    if tx_type in FEE_FREE_TX_TYPES and tx["fee"] != 0:
+        raise TxError("拍卖结算是把已经锁定的钱交给卖家，不收费，fee 必须是 0")
     _require_int(tx, "fee", 0, MAX_AMOUNT_SAT)
 
     if tx_type == "transfer":
@@ -126,6 +147,17 @@ def _validate_fields(tx: dict[str, Any], tx_type: str) -> None:
         _require_int(tx, "price", 1, MAX_AMOUNT_SAT)
     elif tx_type in {"nft_unlist", "nft_buy"}:
         _require_hex(tx, "token_id", length=HEX64)
+    elif tx_type == "nft_auction_create":
+        _require_hex(tx, "token_id", length=HEX64)
+        _require_int(tx, "reserve_price", 1, MAX_AMOUNT_SAT)
+        _require_int(tx, "duration", 1, MAX_AUCTION_SECONDS)
+    elif tx_type == "nft_auction_cancel":
+        _require_hex(tx, "auction_id", length=HEX64)
+    elif tx_type == "nft_auction_settle":
+        _require_hex(tx, "auction_id", length=HEX64)
+    elif tx_type == "nft_bid":
+        _require_hex(tx, "auction_id", length=HEX64)
+        _require_int(tx, "amount", 1, MAX_AMOUNT_SAT)
     elif tx_type == "packet_create":
         _require_int(tx, "total", 1, MAX_AMOUNT_SAT)
         _require_int(tx, "count", 1, 500)
