@@ -198,16 +198,6 @@ def rebuild_block_body(block: dict) -> dict:
     return block
 
 
-def mine_share(service: ClassroomService, player: Player, *, max_tries: int = 20_000, start: int = 0) -> dict:
-    """通过矿池接口提交份额，直到被接受（测试里通常一次就中）。"""
-    job = service.issue_job(player.address)
-    for nonce in range(start, start + max_tries):
-        result = service.submit_share(player.address, job["job_id"], nonce)
-        if result.get("accepted"):
-            return result
-    raise AssertionError("没有在限定次数内找到份额，请调低测试难度")
-
-
 def header_from_job(job: dict, nonce: int) -> dict:
     """按文档里的 84 字节区块头布局组装 header（模拟学生自己写的矿工）。"""
     return {

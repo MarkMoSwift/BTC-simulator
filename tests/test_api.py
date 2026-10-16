@@ -37,13 +37,15 @@ def login(client: TestClient, nickname: str):
     return player, {"Authorization": f"Bearer {response.json()['token']}"}
 
 
-def mine_a_block(client: TestClient, service: ClassroomService, headers: dict, *, tries: int = 20_000) -> dict:
+def mine_a_block(client: TestClient, headers: dict, *, tries: int = 20_000) -> dict:
     job = client.post("/api/mining/job", headers=headers).json()
     for nonce in range(tries):
         if not meets_bits(block_hash(header_from_job(job, nonce)), job["share_bits"]):
             continue
         result = client.post(
-            "/api/mining/share", headers=headers, json={"job_id": job["job_id"], "nonce": nonce}
+            "/api/mining/share",
+            headers=headers,
+            json={"job_id": job["job_id"], "nonce": nonce, "share_bits": job["share_bits"]},
         ).json()
         assert result["accepted"], result
         if result["block"]:
@@ -53,7 +55,7 @@ def mine_a_block(client: TestClient, service: ClassroomService, headers: dict, *
 
 def mine_pending(client: TestClient, service: ClassroomService, headers: dict) -> dict:
     service.pool.tick(time.time() + 5)
-    return mine_a_block(client, service, headers)
+    return mine_a_block(client, headers)
 
 
 def test_public_state_and_login(tmp_path) -> None:
@@ -79,7 +81,7 @@ def test_mining_transfer_and_explorer(tmp_path) -> None:
         alice, alice_headers = login(client, "alice")
         bob, _bob_headers = login(client, "bob")
 
-        block = mine_a_block(client, service, alice_headers)
+        block = mine_a_block(client, alice_headers)
         assert block["height"] == 1
         me = client.get("/api/me", headers=alice_headers).json()
         assert me["balance"] == 50 * COIN
@@ -111,8 +113,8 @@ def test_red_packet_flow(tmp_path) -> None:
     with client:
         alice, alice_headers = login(client, "alice")
         bob, bob_headers = login(client, "bob")
-        mine_a_block(client, service, alice_headers)
-        mine_a_block(client, service, bob_headers)
+        mine_a_block(client, alice_headers)
+        mine_a_block(client, bob_headers)
 
         create = signed_tx(alice, "packet_create", total=5 * COIN, count=2, note="新年快乐", fee=10_000)
         client.post("/api/transactions", headers=alice_headers, json={"tx": create})
@@ -150,8 +152,8 @@ def test_nft_market_flow(tmp_path) -> None:
     with client:
         alice, alice_headers = login(client, "alice")
         bob, bob_headers = login(client, "bob")
-        mine_a_block(client, service, alice_headers)
-        mine_a_block(client, service, bob_headers)
+        mine_a_block(client, alice_headers)
+        mine_a_block(client, bob_headers)
 
         mint = signed_tx(alice, "nft_mint", name="矿石徽章", seed="0123456789abcdef", fee=10_000)
         client.post("/api/transactions", headers=alice_headers, json={"tx": mint})
@@ -186,7 +188,7 @@ def test_nft_auction_flow(tmp_path) -> None:
         bob, bob_headers = login(client, "bob")
         carol, carol_headers = login(client, "carol")
         for headers in (alice_headers, bob_headers, carol_headers):
-            mine_a_block(client, service, headers)
+            mine_a_block(client, headers)
 
         mint = signed_tx(alice, "nft_mint", name="课堂徽章", seed="0123456789abcdef", fee=10_000)
         client.post("/api/transactions", headers=alice_headers, json={"tx": mint})

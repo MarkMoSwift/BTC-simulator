@@ -85,8 +85,7 @@ class PlayerMining:
     address: str
     # 下一份作业要下发的份额难度，由 _next_share_bits 按实测算力算出。
     share_bits: int
-    # 已经下发、同学正在按它搜索的份额难度：验证份额和记录工作量都按它算。
-    # 调整只影响下一份作业，否则服务器刚把难度调高，就会把同学按旧目标找到的份额判成不合格。
+    # 最近下发给这个矿工的份额难度：对外显示，并作为 _next_share_bits 的调整基准。
     issued_share_bits: int
     work: int = 0
     shares: int = 0
@@ -94,18 +93,39 @@ class PlayerMining:
     blocks_found: int = 0
     last_share_at: float = 0.0
     samples: deque[tuple[float, int]] = field(default_factory=deque)
+    # 当前这段连续挖矿从哪一刻开始，算力读数拿它当分母的起点。
+    window_started_at: float = 0.0
     unflushed_work: int = 0
     unflushed_shares: int = 0
     unflushed_blocks: int = 0
 
+    def record_share(self, now: float, work: int, target_seconds: float) -> float:
+        """收下一份验证通过的份额，返回折算出的算力。
+
+        和上一份份额隔了一个窗口以上，说明中间停过，这段空档不能算进分母，于是重新开
+        一段。新一段的第一份份额前面算了多久无从得知，只有份额难度被控制到的目标间隔
+        是已知的，就拿它当起点，等后面的份额把这个估计修正过来。
+        """
+        if now - self.last_share_at > RATE_WINDOW_SECONDS:
+            self.window_started_at = now - target_seconds
+        self.last_share_at = now
+        self.samples.append((now, work))
+        return self.hashrate(now)
+
     def hashrate(self, now: float) -> float:
+        """最近一个窗口里验证通过的工作量，除以这段挖矿已经过去的时间。
+
+        分母是这段连续挖矿的时长，而不是窗口里第一份份额到现在的间隔：份额交得稀的
+        时候，两份份额可能只隔几秒，按那几秒折算会让安静的矿工在排行榜上读数翻几倍。
+        """
         cutoff = now - RATE_WINDOW_SECONDS
         while self.samples and self.samples[0][0] < cutoff:
             self.samples.popleft()
         if not self.samples:
             return 0.0
         total = sum(work for _, work in self.samples)
-        return total / max(now - self.samples[0][0], 1.0)
+        span = min(now - self.window_started_at, RATE_WINDOW_SECONDS)
+        return total / span
 
 
 @dataclass
@@ -184,7 +204,20 @@ class MiningPool:
         return changes
 
     # ---------- 份额 ----------
-    def submit_share(self, address: str, job_id: str, nonce: int, now: float | None = None) -> dict[str, Any]:
+    def submit_share(
+        self,
+        address: str,
+        job_id: str,
+        nonce: int,
+        share_bits: int,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """验算一份份额，并按矿工报上来的难度记账。
+
+        难度由矿工带上，是因为服务端只知道自己下发过哪些难度，不知道同学手上那份作业是
+        哪一版：调过难度以后还在按旧目标搜索的份额，就该按旧难度验证和记账，否则这一段
+        的算力会凭空多出或者少掉一截。
+        """
         now = now if now is not None else time.time()
         if isinstance(nonce, bool) or not isinstance(nonce, int) or not 0 <= nonce <= 0xFFFFFFFF:
             return self._reject("nonce 必须是 0 到 2^32-1 之间的整数")
@@ -193,34 +226,34 @@ class MiningPool:
             return self._reject("作业已经更新，请重新获取")
         if not self._allow_submission(address, now):
             return self._reject("提交过于频繁")
+        if isinstance(share_bits, bool) or not isinstance(share_bits, int):
+            return self._reject("share_bits 必须是整数")
 
         player = self._ensure_player(address)
-        share_bits = self._clamp_share_bits(player.issued_share_bits, job.difficulty)
+        bits = self._clamp_share_bits(share_bits, job.difficulty)
         key = f"{job_id}:{address}:{nonce}"
         if key in self.seen_shares:
             return self._reject("这个 nonce 已经提交过")
 
         digest = block_hash(job.header(self.miner_tag(address), address, nonce))
-        if not meets_bits(digest, share_bits):
+        if not meets_bits(digest, bits):
             return self._reject("哈希没有达到份额难度")
 
         self.seen_shares.add(key)
-        work = 1 << share_bits
+        work = 1 << bits
         player.work += work
         player.unflushed_work += work
         player.shares += 1
         player.unflushed_shares += 1
         player.best_share_bits = max(player.best_share_bits, actual_bits(digest))
-        player.samples.append((now, work))
-        player.last_share_at = now
         self.stage[address] = self.stage.get(address, 0) + work
-        rate = player.hashrate(now)
-        player.share_bits = self._next_share_bits(rate, job.difficulty)
+        rate = player.record_share(now, work, float(self.settings.share_target_seconds))
+        player.share_bits = self._next_share_bits(player.issued_share_bits, rate, job.difficulty)
 
         result: dict[str, Any] = {
             "accepted": True,
             "reason": None,
-            "share_bits": share_bits,
+            "share_bits": bits,
             "next_share_bits": player.share_bits,
             "work": work,
             "hash": digest,
@@ -431,13 +464,18 @@ class MiningPool:
         upper = min(self.settings.share_bits_max, max(job_difficulty, self.settings.share_bits_min))
         return min(max(int(bits), self.settings.share_bits_min), upper)
 
-    def _next_share_bits(self, rate: float, job_difficulty: int) -> int:
-        """份额难度直接按实测算力定：目标是每个同学大约每 share_target_seconds 交一份份额。
+    def _next_share_bits(self, current_bits: int, rate: float, job_difficulty: int) -> int:
+        """按实测算力定份额难度，目标是每个同学大约每 share_target_seconds 交一份份额。
 
-        份额难度每差一位，预期份额间隔就差一倍，所以按当前算力一次算准，
-        比一位一位地试要快得多，也不会在难度上限上停下来。
+        难度每差一位，预期份额间隔就差一倍。现有难度带来的间隔落在目标的一半到两倍
+        之间就保持不变，这样读数的小幅波动不会让难度在两档之间来回跳；真偏离了目标，
+        就按当前算力一次算准，而不是一位一位地试。
         """
-        wanted = math.ceil(math.log2(rate * self.settings.share_target_seconds))
+        target_seconds = float(self.settings.share_target_seconds)
+        expected_seconds = (1 << max(int(current_bits), 0)) / max(rate, 1.0)
+        if target_seconds / 2 <= expected_seconds <= target_seconds * 2:
+            return self._clamp_share_bits(int(current_bits), job_difficulty)
+        wanted = math.ceil(math.log2(max(rate, 1.0) * target_seconds))
         return self._clamp_share_bits(wanted, job_difficulty)
 
     def _allow_submission(self, address: str, now: float) -> bool:

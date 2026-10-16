@@ -113,7 +113,10 @@ class Session:
 
     def submit(self, nonce: int) -> None:
         reply = request(
-            self.base, "/api/mining/share", {"job_id": self.job["job_id"], "nonce": nonce}, self.token
+            self.base,
+            "/api/mining/share",
+            {"job_id": self.job["job_id"], "nonce": nonce, "share_bits": self.job["share_bits"]},
+            self.token,
         )
         if not reply["accepted"]:
             print(f"份额被拒绝：{reply['reason']}")

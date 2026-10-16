@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from app.core.block import block_hash, meets_bits, merkle_root, target_for_bits
 from app.core.mining_pool import split_reward
 from tests.conftest import (
@@ -16,26 +18,44 @@ from tests.conftest import (
 
 def submit_valid_share(service, player, job, *, now: float) -> dict:
     nonce = find_nonce(job, job["share_bits"])
-    return service.submit_share(player.address, job["job_id"], nonce, now)
+    return service.submit_share(player.address, job["job_id"], nonce, job["share_bits"], now)
 
 
 def mine_until_block(service, player, *, start_time: float | None = None) -> dict:
-    """模拟学生矿工：作业下发的份额难度会被服务器自动调整，这里跟着更新。"""
+    """模拟学生矿工：拿一份作业，就按这份作业的份额难度一直搜到出块。"""
     now = start_time if start_time is not None else time.time()
     job = service.issue_job(player.address, now)
-    share_bits = job["share_bits"]
     for nonce in range(4_000_000):
-        if not meets_bits(block_hash(header_from_job(job, nonce)), share_bits):
+        if not meets_bits(block_hash(header_from_job(job, nonce)), job["share_bits"]):
             continue
         now += 2.0
-        result = service.submit_share(player.address, job["job_id"], nonce, now)
-        if not result.get("accepted"):
-            share_bits = service.pool.miner_stats(player.address, now)["share_bits"]
-            continue
-        share_bits = max(result["next_share_bits"], share_bits)
+        result = service.submit_share(player.address, job["job_id"], nonce, job["share_bits"], now)
         if result.get("block"):
             return result
     raise AssertionError("没有在限定次数内挖到区块")
+
+
+def share_nonces(
+    job: dict,
+    bits: int,
+    count: int,
+    *,
+    start: int = 0,
+    missed_bits: int | None = None,
+) -> list[int]:
+    """挑出达到 `bits`、但没达到 `missed_bits`（默认出块难度）的 nonce。
+
+    默认挡掉同时达到出块难度的 nonce，免得测试在提交份额时顺手挖出区块、中途换了作业。
+    """
+    missed = job["difficulty"] if missed_bits is None else missed_bits
+    found: list[int] = []
+    for nonce in range(start, start + 2_000_000):
+        digest = block_hash(header_from_job(job, nonce))
+        if meets_bits(digest, bits) and not meets_bits(digest, missed):
+            found.append(nonce)
+            if len(found) == count:
+                return found
+    raise AssertionError("在限定次数内没有找到足够的份额 nonce")
 
 
 def test_share_must_be_really_hashed(tmp_path) -> None:
@@ -48,7 +68,7 @@ def test_share_must_be_really_hashed(tmp_path) -> None:
         for nonce in range(1000)
         if not meets_bits(block_hash(header_from_job(job, nonce)), job["share_bits"])
     )
-    result = service.submit_share(player.address, job["job_id"], forged)
+    result = service.submit_share(player.address, job["job_id"], forged, job["share_bits"])
     assert result["accepted"] is False
     assert "份额难度" in result["reason"]
 
@@ -65,13 +85,13 @@ def test_anyone_can_rebuild_the_header_from_a_job(tmp_path) -> None:
     assert merkle_root(job["tx_ids"]) == job["merkle_root"]
 
     nonce = find_nonce(job, job["share_bits"])
-    result = service.submit_share(player.address, job["job_id"], nonce)
+    result = service.submit_share(player.address, job["job_id"], nonce, job["share_bits"])
     assert result["accepted"], result["reason"]
     assert result["hash"] == block_hash(header_from_job(job, nonce))
 
 
-def test_share_uses_the_difficulty_from_its_job(tmp_path) -> None:
-    """份额难度只改下一份作业：还在按旧目标搜索的份额照收，并按旧难度记账。"""
+def test_share_is_scored_at_the_difficulty_the_miner_reports(tmp_path) -> None:
+    """份额按矿工报的难度验证和记账：作业难度调高后，按旧目标搜出来的份额照收。"""
     service = make_service(
         tmp_path,
         chain={"initial_difficulty": 20},
@@ -86,29 +106,28 @@ def test_share_uses_the_difficulty_from_its_job(tmp_path) -> None:
     now = time.time()
     job = service.issue_job(player.address, now)
     assert job["share_bits"] == 8
-    easy = [nonce for nonce in range(200_000) if meets_bits(block_hash(header_from_job(job, nonce)), 8)]
+    easy = share_nonces(job, 8, 5)
 
-    first = service.submit_share(player.address, job["job_id"], easy[0], now + 2.0)
-    assert first["accepted"], first["reason"]
-    assert first["share_bits"] == 8
-    assert first["next_share_bits"] == 9
+    shares = [
+        service.submit_share(player.address, job["job_id"], nonce, 8, now + 0.5 * (index + 1))
+        for index, nonce in enumerate(easy[:4])
+    ]
+    assert all(item["accepted"] for item in shares)
+    assert [item["share_bits"] for item in shares] == [8, 8, 8, 8]
+    assert [item["work"] for item in shares] == [1 << 8] * 4
+    # 8 位份额 0.5 秒一份，比 2 秒的目标快了四倍，第四份才把下一份作业抬到 10 位。
+    assert shares[-1]["next_share_bits"] == 10
 
-    second = service.submit_share(player.address, job["job_id"], easy[1], now + 2.5)
-    assert second["accepted"], second["reason"]
-    assert second["share_bits"] == 8
-    assert second["work"] == 1 << 8
-
-    third = service.submit_share(player.address, job["job_id"], easy[2], now + 4.0)
-    assert third["accepted"], third["reason"]
-    assert third["share_bits"] == 8
-    assert third["next_share_bits"] == 10
-
-    harder = service.issue_job(player.address, now + 4.5)
+    harder = service.issue_job(player.address, now + 2.5)
     assert harder["share_bits"] == 10
-    below_new_target = next(
-        nonce for nonce in easy[3:] if not meets_bits(block_hash(header_from_job(harder, nonce)), 10)
-    )
-    rejected = service.submit_share(player.address, harder["job_id"], below_new_target, now + 6.0)
+
+    still_old = service.submit_share(player.address, job["job_id"], easy[4], 8, now + 3.0)
+    assert still_old["accepted"], still_old["reason"]
+    assert still_old["share_bits"] == 8
+    assert still_old["work"] == 1 << 8
+
+    below_new_target = share_nonces(job, 8, 1, start=easy[-1] + 1, missed_bits=10)[0]
+    rejected = service.submit_share(player.address, harder["job_id"], below_new_target, 10, now + 4.0)
     assert rejected["accepted"] is False
     assert "份额难度" in rejected["reason"]
 
@@ -128,13 +147,90 @@ def test_slow_miner_gets_an_easier_share_target(tmp_path) -> None:
     player = make_player(service, "bob")
     now = time.time()
     job = service.issue_job(player.address, now)
-    first = find_nonce(job, 16)
-    second = find_nonce(job, 16, start=first + 1)
+    first, second = share_nonces(job, 16, 2)
 
-    assert service.submit_share(player.address, job["job_id"], first, now + 1.0)["accepted"]
-    slow = service.submit_share(player.address, job["job_id"], second, now + 20.0)
+    assert service.submit_share(player.address, job["job_id"], first, 16, now + 1.0)["accepted"]
+    slow = service.submit_share(player.address, job["job_id"], second, 16, now + 20.0)
     assert slow["accepted"], slow["reason"]
     assert slow["next_share_bits"] < job["share_bits"]
+
+
+def test_first_share_reads_at_the_target_interval(tmp_path) -> None:
+    """窗口里只有一份份额的时候，读数按难度对应的目标间隔折算，不能拿 1 秒当分母。"""
+    service = make_service(
+        tmp_path,
+        chain={"initial_difficulty": 24},
+        pool={
+            "initial_share_bits": 16,
+            "share_bits_min": 8,
+            "share_bits_max": 24,
+            "share_target_seconds": 2.0,
+        },
+    )
+    player = make_player(service, "carol")
+    now = time.time()
+    job = service.issue_job(player.address, now)
+    first, second = share_nonces(job, 16, 2)
+
+    fresh = service.submit_share(player.address, job["job_id"], first, 16, now + 40.0)
+    assert fresh["accepted"], fresh["reason"]
+    assert fresh["hashrate"] == (1 << 16) / 2.0
+
+    paused = service.submit_share(player.address, job["job_id"], second, 16, now + 71.0)
+    assert paused["accepted"], paused["reason"]
+    assert paused["hashrate"] == (1 << 16) / 2.0
+
+
+def test_window_reading_settles_on_the_work_rate(tmp_path) -> None:
+    """连续挖满一个窗口以后，读数回到窗口里验证过的工作量除以窗口长度。"""
+    service = make_service(
+        tmp_path,
+        chain={"initial_difficulty": 24},
+        pool={
+            "initial_share_bits": 16,
+            "share_bits_min": 8,
+            "share_bits_max": 24,
+            "share_target_seconds": 2.0,
+        },
+    )
+    player = make_player(service, "erin")
+    now = time.time()
+    job = service.issue_job(player.address, now)
+    nonces = share_nonces(job, 16, 17)
+
+    readings = [
+        service.submit_share(player.address, job["job_id"], nonce, 16, now + 2.0 * (index + 1))["hashrate"]
+        for index, nonce in enumerate(nonces)
+    ]
+
+    # 两秒一份 16 位份额，就是这个难度本来约定的速度，读数不该比它高出几个百分点以上。
+    assert readings[-1] == pytest.approx((1 << 16) / 2.0, rel=0.1)
+
+
+def test_share_difficulty_holds_steady_when_the_rate_wobbles(tmp_path) -> None:
+    """预期间隔在目标的一半到两倍之间就保持难度，读数抖动不该让它一档一档地跳。"""
+    service = make_service(
+        tmp_path,
+        chain={"initial_difficulty": 24},
+        pool={
+            "initial_share_bits": 16,
+            "share_bits_min": 8,
+            "share_bits_max": 24,
+            "share_target_seconds": 2.0,
+        },
+    )
+    player = make_player(service, "dave")
+    now = time.time()
+    job = service.issue_job(player.address, now)
+    nonces = share_nonces(job, 16, 4)
+
+    chosen = [
+        service.submit_share(player.address, job["job_id"], nonce, 16, now + 2.7 * (index + 1))["next_share_bits"]
+        for index, nonce in enumerate(nonces)
+    ]
+
+    # 16 位在 24 kH/s 上是 2.7 秒一份，落在目标区间里，后面几份不该再换档。
+    assert chosen[1:] == [16, 16, 16]
 
 
 def test_duplicate_and_stale_shares_are_rejected(tmp_path) -> None:
@@ -142,15 +238,15 @@ def test_duplicate_and_stale_shares_are_rejected(tmp_path) -> None:
     player = make_player(service, "alice")
     job = service.issue_job(player.address)
     now = time.time()
-    nonce = find_nonce(job, job["share_bits"])
-    assert service.submit_share(player.address, job["job_id"], nonce, now)["accepted"]
-    duplicate = service.submit_share(player.address, job["job_id"], nonce, now + 2)
+    nonce = share_nonces(job, job["share_bits"], 1)[0]
+    assert service.submit_share(player.address, job["job_id"], nonce, job["share_bits"], now)["accepted"]
+    duplicate = service.submit_share(player.address, job["job_id"], nonce, job["share_bits"], now + 2)
     assert duplicate["accepted"] is False
     assert "提交过" in duplicate["reason"]
 
     result = mine_until_block(service, player, start_time=now + 10)
     assert result["block"]["height"] == 1
-    stale = service.submit_share(player.address, job["job_id"], nonce + 1, now + 40)
+    stale = service.submit_share(player.address, job["job_id"], nonce + 1, job["share_bits"], now + 40)
     assert stale["accepted"] is False
     assert "作业已经更新" in stale["reason"]
 
@@ -180,7 +276,7 @@ def test_flooding_client_keeps_getting_shares_accepted(tmp_path) -> None:
     accepted_at = [
         index * 0.05
         for index, nonce in enumerate(valid_nonces)
-        if service.submit_share(player.address, job["job_id"], nonce, started + index * 0.05)["accepted"]
+        if service.submit_share(player.address, job["job_id"], nonce, 8, started + index * 0.05)["accepted"]
     ]
 
     assert accepted_at, "洪水式提交后一份都没被接受"

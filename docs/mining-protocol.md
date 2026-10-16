@@ -148,11 +148,13 @@ POST $BASE/api/mining/share
 Authorization: Bearer <token>
 Content-Type: application/json
 
-{"job_id": "…", "nonce": 123456}
+{"job_id": "…", "nonce": 123456, "share_bits": 14}
 ```
 
-`nonce` 必须是 0 到 4294967295 之间的整数。服务端会用你的 `miner_tag`、`prev_hash` 和
-当前作业重新拼区块头并验算哈希，所以伪造 nonce 或改难度都不会通过。
+`nonce` 必须是 0 到 4294967295 之间的整数。`share_bits` 是你搜索这份作业时实际用的份额
+难度，正常情况下就是作业里给你的那个值，作业没换就别改。服务端会用你的 `miner_tag`、
+`prev_hash` 和当前作业重新拼区块头，按你报上来的难度验算哈希：报低了这份工作量就白算，
+报高了必须真交出对应难度的哈希，所以伪造 nonce 或者临时改难度都占不到便宜。
 
 普通结果：
 
@@ -185,10 +187,12 @@ Content-Type: application/json
 
 收到 `job` 字段要立刻切换作业；收到 `block` 表示这个区块已经上链。
 
-`share_bits` 是这一份份额用的难度，和你手上作业里的 `share_target` 对应：作业没换，
-服务端就一直按它验证和记账。`next_share_bits` 是服务端按你的实测算力算出的下一份作业难度，
-目标是让你大约每 `share_target_seconds`（默认 2 秒）交一份份额。难度每差一位，预期份额间隔
-就差一倍，所以它是一次算准的，不是一位一位地试。
+`share_bits` 是服务端按你报上来的难度给你记的工作量，和你搜索时用的目标对应。手上这份
+作业的难度和刚下发的新难度不一致时，继续按旧难度搜、按旧难度报，记出来的算力就是准的。
+`next_share_bits` 是服务端按你的实测算力算出的下一份作业难度：服务端把最近 30 秒里验证
+通过的工作量除以这 30 秒当作你的算力，中间停过一个窗口以上就从新的份额重新起算，再按它选难度：
+现有难度带来的预期间隔落在 `share_target_seconds`（默认 2 秒）的一半到两倍之间就不动，
+真偏离了目标才一次算准，而不是一位一位地试。所以读数的小幅波动不会让难度在两档之间来回跳。
 
 想提前用上新难度，重新取一份作业，或者自己按 `target = (1 << (256 - bits)) - 1` 换算。
 一直按旧作业的旧目标搜索也不会被拒收，只是每一份份额都还按旧难度记账。
@@ -213,7 +217,7 @@ Content-Type: application/json
 | --- | --- | --- |
 | 页面 → Worker | `{type: "job", job}` | 新作业，收到后从头开始搜索，并且要让上一批停下来 |
 | 页面 → Worker | `{type: "stop"}` | 暂停挖矿 |
-| Worker → 页面 | `{type: "share", nonce}` | 提交份额，页面会带上当前 `job_id` 发给服务器 |
+| Worker → 页面 | `{type: "share", nonce}` | 提交份额，页面会带上当前 `job_id` 和这份作业的 `share_bits` 发给服务器 |
 | Worker → 页面 | `{type: "progress", hashes}` | 自上次上报以来算过的哈希数，用来显示实时算力 |
 
 `SimCrypto` 提供 `sha256`、`sha256d`、`hexToBytes`、`bytesToHex`、`utf8Bytes`、

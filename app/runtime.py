@@ -472,10 +472,17 @@ class ClassroomService:
         self._touch(address, now)
         return self.pool.issue_job(address, now)
 
-    def submit_share(self, address: str, job_id: str, nonce: int, now: float | None = None) -> dict[str, Any]:
+    def submit_share(
+        self,
+        address: str,
+        job_id: str,
+        nonce: int,
+        share_bits: int,
+        now: float | None = None,
+    ) -> dict[str, Any]:
         now = now if now is not None else time.time()
         self._touch(address, now)
-        result = self.pool.submit_share(address, job_id, nonce, now)
+        result = self.pool.submit_share(address, job_id, nonce, share_bits, now)
         if result.get("accepted"):
             self.publish(
                 "share",

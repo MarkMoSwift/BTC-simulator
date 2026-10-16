@@ -42,6 +42,7 @@ class TransactionBody(BaseModel):
 class ShareBody(BaseModel):
     job_id: str
     nonce: int = Field(ge=0, le=0xFFFFFFFF)
+    share_bits: int = Field(ge=1, le=128)
 
 
 class BanBody(BaseModel):
@@ -196,7 +197,7 @@ def create_app(service: ClassroomService) -> FastAPI:
     @app.post("/api/mining/share")
     async def mining_share(body: ShareBody, token: str = Depends(student_token)) -> dict[str, Any]:
         player = service.student(token)
-        return service.submit_share(player["address"], body.job_id, body.nonce)
+        return service.submit_share(player["address"], body.job_id, body.nonce, body.share_bits)
 
     @app.post("/api/packets/{packet_id}/claim-ticket")
     async def claim_ticket(packet_id: str, token: str = Depends(student_token)) -> dict[str, Any]:

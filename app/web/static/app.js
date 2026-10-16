@@ -27,6 +27,8 @@
     job: null,
     workerJobKey: "",
     workerJobId: "",
+    /* 交给 Worker 的那份作业用的份额难度：提交份额时按它记账，服务端不会猜。 */
+    workerShareBits: 0,
     me: null,
     tick: null,
     blocks: [],
@@ -262,6 +264,7 @@
     state.rateSamples = [];
     state.workerJobKey = "";
     state.workerJobId = "";
+    state.workerShareBits = 0;
     renderMiningStats();
     ensureWorker();
     pushLog(message);
@@ -275,6 +278,7 @@
     /* 暂停期间 Worker 里的作业已经作废，恢复时要重新下发一次。 */
     state.workerJobKey = "";
     state.workerJobId = "";
+    state.workerShareBits = 0;
     updateMineButton();
     ensureWorker();
     pushLog("开始挖矿，正在向服务器要作业…");
@@ -320,6 +324,7 @@
     }
     state.workerJobKey = key;
     state.workerJobId = job.job_id;
+    state.workerShareBits = job.share_bits;
     ensureWorker().postMessage({ type: "job", job });
   }
 
@@ -350,7 +355,11 @@
       return;
     }
     try {
-      const result = await api.post("/api/mining/share", { job_id: state.workerJobId, nonce: share.nonce });
+      const result = await api.post("/api/mining/share", {
+        job_id: state.workerJobId,
+        nonce: share.nonce,
+        share_bits: state.workerShareBits,
+      });
       if (!result.accepted) {
         const reason = String(result.reason);
         if (reason.includes("作业")) {
