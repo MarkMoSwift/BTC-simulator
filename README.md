@@ -1,260 +1,172 @@
-﻿# BTC 模拟器 v0.1.1
+# 区块链科普模拟器
 
-这是一个教学型 BTC 模拟软件，不是真实 Bitcoin 钱包，不连接主网或测试网，也不兼容真实 BTC 地址。MVP 使用账户余额模型、SQLite 本地存储、ECDSA secp256k1 签名、TCP JSON Lines P2P 和本地 Web 控制台。
+一台电脑当课堂网络，学生用浏览器当矿机。打开网址就能挖矿、转账、发红包、买卖藏品，
+大屏实时展示算力榜和挖矿榜，学生还可以把自己改进过的矿工程序载入进来比拼速度。
 
-私钥在 MVP 中以明文保存到 SQLite，仅用于本地模拟教学，不能用于真实资产。
+## 课堂里能做什么
 
-## 安装
+| 能力 | 说明 |
+| --- | --- |
+| macOS 与 Windows 都能跑 | 服务器只依赖 Python，学生端零安装，浏览器打开网址即可 |
+| 实时算力榜 + 累计挖矿榜 | 投影大屏每秒刷新，按份额工作量统计，链上确认后计入累计 |
+| 链上红包 | 拼手气红包，金额由链上数据推导，谁都能复算；发出去的钱由链上托管 |
+| 藏品市场 | 铸造、上架、购买、下架，买卖双方都要签名，价格用挖出来的币结算 |
+| 给学生留的坑 | 默认矿工故意写得直白，改一改就能快好几倍；协议公开，可以用任何语言接入 |
+| 教师控制台 | 口令登录，调难度、发通知、停用账号、开始新一局、导出成绩 CSV |
+
+## 快速开始
+
+需要 Python 3.10 或更新版本。第一次运行会自动生成 `config.json`，里面有一个随机教师口令。
+
+### macOS
 
 ```bash
-python -m pip install -r requirements.txt
+cd BTC-simulator
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-## 启动单节点
+### Windows（PowerShell）
 
-```bash
-python main.py --config config.json
+```powershell
+cd BTC-simulator
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python main.py
 ```
 
-打开：
+如果 PowerShell 拒绝执行激活脚本，先运行
+`Set-ExecutionPolicy -Scope Process RemoteSigned` 再激活。
+
+### 启动后看到什么
 
 ```text
-http://127.0.0.1:8000
+  区块链科普模拟器 v2.0.0
+  课堂名称：区块链科普课堂
+
+  本机打开：  http://127.0.0.1:8000
+  学生入口：  http://192.168.1.23:8000
+  投影大屏：  http://127.0.0.1:8000/bigscreen
+  教师控制台：http://127.0.0.1:8000/teacher
+  教师口令：  A1B2C3
 ```
 
-首次启动会自动创建配置、SQLite 数据库、默认钱包和创世块。
+| 页面 | 谁用 | 地址 |
+| --- | --- | --- |
+| 学生控制台 | 学生 | `http://<你的局域网IP>:8000` |
+| 投影大屏 | 教室投影 | `http://127.0.0.1:8000/bigscreen` |
+| 教师控制台 | 教师 | `http://127.0.0.1:8000/teacher` |
+| 课堂状态接口 | 学生自己写的矿工 | `http://<你的局域网IP>:8000/api/public` |
 
-## 启动三个本地节点
+学生进入页面后填一个昵称就开始挖矿，昵称会和这台设备浏览器里的钱包绑定。
+同一台电脑想模拟多个学生，用不同浏览器或隐私窗口即可。
 
-分别开三个终端：
+## 课堂流程建议
+
+| 时间 | 环节 |
+| --- | --- |
+| 课前 5 分钟 | 打开服务器和投影大屏，确认学生入口网址；宣布教师口令只在必要时使用 |
+| 0-10 分钟 | 学生进入页面挖矿，讲钱包：私钥在浏览器里，服务器只看到公钥和签名 |
+| 10-20 分钟 | 讲区块：大屏上的区块高度、难度、coinbase 分配、梅克尔根 |
+| 20-30 分钟 | 学生互相转账、抢红包；讲手续费和内存池 |
+| 30-40 分钟 | 藏品市场：铸造、上架、买入，讲"不可伪造"和"签名授权" |
+| 40-45 分钟 | 提高难度或开始新一局，引出作业：把矿工改快（见 `docs/lab.md`） |
+
+## 让学生动手改矿工
+
+三条路线，都在 [`docs/lab.md`](docs/lab.md) 里有详细步骤：
+
+1. **浏览器里换矿工（零安装）**：复制 `app/web/static/miner.js`，改完在控制台点
+   「自定义矿工」载入文件，立刻用新程序挖矿，排行榜实时反映速度。
+2. **自己写矿工（任何语言）**：按 [`docs/mining-protocol.md`](docs/mining-protocol.md)
+   实现 84 字节区块头和 nonce 提交，参考实现见
+   [`examples/python_miner.py`](examples/python_miner.py)。
+3. **改规则**：教师控制台调整出块难度、目标出块时间、奖励减半周期，观察全网行为。
+
+服务器会逐份验证哈希，改数字、谎报工作量都不会被接受。
+
+## 教师控制台
+
+- 课堂状态：区块高度、当前难度、全网算力、在线人数、内存池、下一块奖励
+- 课堂参数：难度固定值/自动调整上限、目标出块时间、调整周期、奖励与减半、手续费下限、
+  份额目标时间、藏品上限、红包有效期
+- 学生管理：停用账号、解除停用、移除（昵称回到未注册状态，学生换昵称可重新加入）
+- 课堂操作：发布通知（学生端和大屏同时弹出）、开始新一局、导出成绩 CSV
+
+教师口令存在 `config.json` 的 `admin_key` 字段，也可以在启动时覆盖：
 
 ```bash
-python main.py --config config_node1.json
-python main.py --config config_node2.json
-python main.py --config config_node3.json
+python main.py --admin-key NEWKEY
 ```
 
-Web 控制台：
+## 目录结构
 
 ```text
-server1 http://127.0.0.1:8000  P2P 127.0.0.1:7464
-server2 http://127.0.0.1:8001  P2P 127.0.0.1:7465
-server3 http://127.0.0.1:8002  P2P 127.0.0.1:7466
+main.py                     启动入口，打印学生入口网址与教师口令
+app/config.py               课堂参数与配置文件读写
+app/units.py                金额单位（聪）
+app/core/block.py           84 字节区块头、目标值、梅克尔根
+app/core/chain.py           区块校验、难度调整、数据库重放
+app/core/state.py           状态机：余额、藏品、红包全部由区块重放得到
+app/core/mining_pool.py     挖矿作业、份额验证、两阶段奖励窗口
+app/core/redpacket.py       拼手气红包金额推导
+app/storage/sqlite_store.py 区块、交易、内存池、账号与挖矿统计
+app/web/server.py           HTTP 与 WebSocket 接口
+app/web/static/             学生控制台、投影大屏、教师控制台、密码学与矿工
+examples/python_miner.py    按公开协议接入的参考矿工
+docs/mining-protocol.md     挖矿协议（写给学生的实现说明）
+docs/lab.md                 学生实验手册：把矿工改快
+docs/scoring.md             课堂评分建议
+tests/                      自动化测试
 ```
 
-## 初始化局域网节点
+## 常见问题
 
-如果多台电脑在同一个局域网内，可以让每个人初始化自己的节点并加入网络。第一台电脑可以作为种子节点，后续节点只需要知道种子节点的局域网 IP 和 P2P 端口。
+**学生打不开网址**
+确认手机或电脑连的是同一个 Wi-Fi，且没有开启"客户端隔离"；服务器那台机器允许入站连接。
+Windows 第一次运行会弹出防火墙提示，勾选"专用网络"并允许。
 
-### 1. 第一台电脑创建种子节点
+**端口被占用**
+`python main.py --port 8080` 换一个端口，配置会写回 `config.json`。
+
+**昵称被占用**
+昵称和钱包绑定，换一个昵称即可；教师也可以在控制台把旧昵称移除。
+
+**算力显示 0**
+浏览器把后台标签页降频了，切回页面就会恢复；自定义矿工如果不发送
+`progress` 消息，本地算力也会显示 0，但服务器仍按份额统计。
+
+**想彻底重来**
+删除 `data/classroom.db` 会清空链、账号和统计；只清链用教师控制台的「开始新一局」。
+
+## 安全与边界
+
+- 这是课堂模拟器，不是比特币：单节点、没有 P2P 网络与分叉选择，难度按"前导零位数"
+  定义，便于板书和口算。
+- 私钥只存在学生浏览器的 `localStorage`，服务器数据库中只有公钥和地址。
+- 局域网内走明文 HTTP，适合教室使用，不要放到公网。
+- 服务端对每份份额、每笔交易都重新验证哈希与签名，改前端数字无法作弊。
+- 学生删除浏览器数据会丢私钥，相当于丢钱包；重新登录会得到新地址，需要教师移除旧昵称。
+
+## 测试
 
 ```bash
-python scripts/init_node.py --name seed --config config_seed.json --no-prompt
-python main.py --config config_seed.json
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-脚本会生成一个配置文件，默认：
+## 课堂机与源码保持一致
 
-```text
-Web 控制台: 127.0.0.1:8000
-P2P 节点:   0.0.0.0:7464
-数据库:     ./data/seed.db
-```
-
-本机打开：
-
-```text
-http://127.0.0.1:8000
-```
-
-默认情况下，Web 控制台只允许本机打开，不会暴露给整个局域网。如果确实需要让其他电脑访问这个 Web 页面，需要显式指定：
-```bash
-python scripts/init_node.py --name seed --config config_seed.json --web-host 0.0.0.0 --no-prompt
-```
-
-此时局域网内其他电脑可以打开：
-```text
-http://种子节点局域网IP:8000
-```
-
-把种子节点的 P2P 地址告诉其他人，例如：
-
-```text
-192.168.1.23:7464
-[2001:db8:1234::23]:7464
-```
-
-如果同一堂课需要隔离成不同网络，可以指定 `network_id`：
+课堂机的代码应该和本地开发用的代码完全一致，避免"在我电脑上是好的"。做法：
 
 ```bash
-python scripts/init_node.py --name seed --network-id class-a --config config_seed.json --no-prompt
+git clone <仓库地址>
+git rev-parse HEAD          # 两台机器上应输出同一个提交号
+git status --short          # 应该没有改动
 ```
 
-### 2. 其他电脑加入网络
-
-在另一台电脑上任选 IPv4 或 IPv6 地址初始化节点：
-
-```bash
-# IPv4
-python scripts/init_node.py --name alice --config config_alice.json --peer 192.168.1.23:7464 --no-prompt
-
-# IPv6
-python scripts/init_node.py --name bob --config config_bob.json --peer "[2001:db8:1234::23]:7464" --no-prompt
-
-# 启动对应节点，例如
-python main.py --config config_alice.json
-```
-
-启动后节点会自动连接 seed peer，并通过 `HELLO/PEERS/GET_BLOCKS/BLOCKS` 加入网络、同步区块。也可以在 Web 控制台“节点”页手动添加其他节点：
-
-```text
-IP:   192.168.1.23
-Port: 7464
-```
-
-IPv6 在命令行和配置说明中使用标准的 `[IPv6]:port` 格式；Web 节点页的 IP 和 Port 是分开的，因此 IP 输入框直接填写 `2001:db8:1234::23`，不需要方括号。
-
-### 3. 同一台电脑跑多个节点
-
-同一台电脑上端口不能重复，需要分别指定不同端口：
-
-```bash
-python scripts/init_node.py --name node1 --config config_node1.json --listen-port 7464 --web-port 8000 --no-prompt
-python scripts/init_node.py --name node2 --config config_node2.json --listen-port 7465 --web-port 8001 --peer 127.0.0.1:7464 --no-prompt
-```
-
-不同电脑上可以使用相同端口，因为它们的 IP 不同。
-
-### 4. 局域网注意事项
-
-- P2P 连接使用 `listen_ip/listen_port`。默认 `enable_ipv6 = true`，当 `listen_ip = 0.0.0.0` 时会同时尝试监听 `[::]:7464` 和 `0.0.0.0:7464`。
-- Web 控制台使用 `web_host/web_port`，初始化脚本默认 `127.0.0.1:8000`，只允许本机访问；需要局域网访问时再手动加 `--web-host 0.0.0.0`。
-- 如果连接失败，检查系统防火墙是否允许 Python 入站，或是否放行了 `7464` 和 `8000`。
-- 连接其他电脑时不要填 `127.0.0.1`，要填对方的局域网 IP，例如 `192.168.1.23`。
-- 使用 IPv6 链路本地地址时需要带网卡作用域，例如 `fe80::1234%en0`；命令行形式为 `[fe80::1234%en0]:7464`。
-- 可以用 `python scripts/init_node.py --no-ipv6 ...` 关闭 IPv6。若 Web 控制台也要仅通过 IPv6 访问，可把 `web_host` 设置为 `::`，浏览器地址写成 `http://[IPv6地址]:8000`。
-- VPN、代理或虚拟网卡可能让自动检测选中不可供同学访问的地址。此时初始化时使用 `--advertise-ip 真实局域网IPv4 --advertise-ipv6 真实局域网IPv6`，或直接修改配置中的 `advertise_ip` / `advertise_ipv6`。
-- “入网”页会显示本机 Web 地址、P2P 地址、Network ID 和参数 Hash，可直接复制给其他同学。
-- 本项目没有登录鉴权，只建议在可信局域网内演示，不要暴露到公网。
-
-## 课堂功能
-
-Web 控制台内置多个课堂辅助页：
-
-- “入网”：显示本机 Web 控制台地址、P2P 地址、Network ID、参数 Hash，并提供复制按钮和入网码。
-- “实验”：给学生提供任务清单，覆盖钱包、入网、连接节点、挖矿、内存池、同步等关键概念。`r`n- “安全”：显示被拒绝的非法交易、非法区块和异常同步来源，便于观察攻击节点。
-- “教师”：仅在管理员模式 `/?administrator=true` 中显示，用于查看本机和已知学生节点的高度、目标值、挖矿状态、连接状态和参数 Hash。
-
-节点连接时会检查：
-
-```text
-network_id
-chain_params_hash
-```
-
-`chain_params_hash` 由初始难度、自动难度规则、目标出块时间、挖矿奖励、区块交易上限等共识参数计算得到。若某台电脑的参数不同，教师页会显示“参数不匹配”，该节点不会加入当前课堂网络。
-
-## 使用流程
-
-1. 打开节点 Web 控制台。
-2. 在“接收”页复制某个节点地址。
-3. 在另一个节点“发送”页填写接收方地址、金额和手续费。
-4. 交易验证通过后进入本地内存池并广播到已连接节点。
-5. 在“挖矿”页点击“开始挖矿”。
-6. 挖到新区块后，coinbase 奖励默认 `50 BTC + 区块手续费`，区块会保存到 SQLite 并广播。
-7. 在“浏览器”页可以查看历史区块、区块头和区块内交易。
-8. 在“入网”页复制 P2P 地址给其他同学。
-9. 在“实验”页按任务清单完成课堂实验。
-10. 在“教师”页查看全班节点状态。
-
-## 配置
-
-核心字段：
-
-```json
-{
-  "network_id": "btc-sim-classroom",
-  "listen_ip": "0.0.0.0",
-  "enable_ipv6": true,
-  "advertise_ip": null,
-  "advertise_ipv6": null,
-  "listen_port": 7464,
-  "web_port": 8000,
-  "difficulty_mode": "binary_leading_zero",
-  "difficulty": 12,
-  "auto_difficulty": true,
-  "target_block_seconds": 60,
-  "difficulty_adjustment_interval": 10,
-  "difficulty_adjustment_tolerance": 0.25,
-  "min_difficulty": 0,
-  "max_difficulty": 255,
-  "mining_reward": 50.0,
-  "servers": [["127.0.0.1", 7464], ["2001:db8:1234::23", 7464]],
-  "storage": {"type": "sqlite", "path": "./data/blockchain.db"}
-}
-```
-
-默认使用 `difficulty_mode = "binary_leading_zero"`。`difficulty` 表示区块 hash 的二进制前导 0 位数，例如 `difficulty = 12` 表示 hash 的前 12 个二进制位必须为 0，对应的初始 target 形如 `000ffff...`。新区块仍携带完整 256 位十六进制 `target`，只有当区块 hash 的数值小于等于 target 时才有效；target 越小，挖矿越难。
-
-默认开启 `auto_difficulty`，目标出块时间为 `target_block_seconds = 60`，即约 1 分钟一块。模拟器每 `difficulty_adjustment_interval = 10` 个区块评估一次最近出块速度：
-
-- 如果出块持续偏快，下一次难度增加 1 个二进制前导 0 位。
-- 如果出块持续偏慢，下一次难度减少 1 个二进制前导 0 位。
-- 如果出块速度仍在容差范围内，难度保持不变。
-
-这种方式每次只让难度约变化 2 倍，避免十六进制前导 0 带来的 16 倍跳变。
-
-真实 BTC 是每 2016 个区块、约 14 天调整一次。这里把窗口缩短到 10 个区块，是为了本地教学演示能看见调整效果。同一个模拟网络里的所有节点必须配置成相同的难度规则，否则会拒绝彼此挖出的新区块。
-
-初始前导零或精细目标前缀可以在管理员模式下调整：访问 `/?administrator=true` 后，“挖矿”页会显示设置。保存后会写回当前节点的配置文件；如果节点正在挖矿，系统会先暂停。已有区块时，修改初始目标后需要重置到创世块才能从新目标开始。多节点演示时请把每个节点设置成相同规则。
-
-管理员模式下也会显示“重置到创世块”按钮。该操作会保留钱包和节点记录，清空本节点的历史区块、交易和内存池，只留下创世块。需要重置整个本地网络时，请分别在每个节点执行一次。
-
-## 查看数据库
-
-```bash
-sqlite3 data/blockchain.db
-```
-
-常用查询：
-
-```sql
-SELECT height, hash, timestamp FROM blocks ORDER BY height;
-SELECT type, sender, receiver, amount, fee FROM transactions;
-SELECT tx_id, sender, receiver, amount, fee FROM mempool;
-```
-
-## 当前限制
-
-- 不实现真实 Bitcoin 主网协议。
-- 不实现真实 BTC 地址格式。
-- 不实现 UTXO、Script、找零、SPV。
-- 不实现真实 BTC 的 nBits 压缩编码、复杂分叉重组或拜占庭攻击防御。
-- 钱包私钥不加密。
-- Web API 只服务本地教学演示，未做生产级认证授权。
-
-## 更新日志
-本次更新优化了
-1. 节点身份与连接校验逻辑：
-
-- 启动节点时，如果没有手动指定 `--node-name`，程序会自动生成一个新的随机节点名。
-- 节点名生成方式从固定名字池改为随机字符生成，减少多人同时使用时的重名概率，也简化了代码。
-- 连接其他节点时，会依次检查节点名、钱包地址和监听地址，防止同名节点、同钱包节点以及自连接。
-- 增加了重复 peer 地址检查，避免同一个节点被重复连接。
-- 补充了相关测试，确认随机命名和连接身份校验逻辑正常。
-
-2. 难度机制：
-
-- 难度调整改为按二进制前导 0 位数计算，算力偏强时增加 1 位，算力偏弱时减少 1 位，避免原来百分比 target 调整不直观的问题。
-- 区块仍使用 hash <= target 判断有效性，网页中的挖矿状态、区块列表和区块详情已同步显示对应的目标值和二进制难度。
-
-3. 网络安全提示：
-
-- 新增“安全”页面，用于显示非法交易、签名错误、余额不足、非法区块和异常同步等事件。
-- 安全事件会记录来源节点名、IP:Port、钱包地址、相关交易或区块，以及被拒绝的原因，方便定位攻击来源。
-
-4. 种子节点默认配置：
-
-- 种子节点初始化时，Web 控制台默认只绑定 127.0.0.1，不会自动向局域网开放；如需开放，必须显式指定 --web-host 0.0.0.0
-- README 和示例配置已同步更新，相关测试已补充并通过
-
+课堂上临时调参数请走 `config.json` 或教师控制台，不要直接改源码；学生要改的是自己复制出去的
+`miner.js`，通过控制台载入，不覆盖服务器上的文件。

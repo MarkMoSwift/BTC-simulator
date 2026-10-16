@@ -1,1 +1,1 @@
-"""Utility helpers for the BTC simulator."""
+"""通用工具。"""

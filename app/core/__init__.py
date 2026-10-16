@@ -1,1 +1,1 @@
-"""Core blockchain simulation logic."""
+"""链、状态、矿池等核心逻辑。"""

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>区块链科普模拟器 · 教师控制台</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1Z"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></symbol>
+    <symbol id="i-megaphone" viewBox="0 0 24 24"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+    <symbol id="i-player-off" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="22" y1="8" y2="13"/><line x1="22" x2="17" y1="8" y2="13"/></symbol>
+    <symbol id="i-player-on" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+    <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+  </svg>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="icon brand-icon"><use href="#i-shield"/></svg>
+      <div class="brand-text">
+        <strong id="classroom-name">教师控制台</strong>
+        <span class="muted" id="chain-summary">正在连接课堂网络…</span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="connection" id="connection"><i class="dot"></i><span id="connection-text">连接中</span></span>
+      <a class="icon-button" href="/bigscreen" target="_blank" title="打开投影大屏">
+        <svg class="icon"><use href="#i-monitor"/></svg>
+      </a>
+      <button type="button" class="icon-button" id="export" title="导出成绩 CSV" hidden>
+        <svg class="icon"><use href="#i-download"/></svg>
+      </button>
+      <button type="button" class="icon-button" id="logout" title="退出教师控制台" hidden>
+        <svg class="icon"><use href="#i-logout"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel panel-mining">
+      <header class="panel-head">
+        <h2><svg class="icon"><use href="#i-trophy"/></svg>课堂状态</h2>
+        <span class="muted small" id="round-state">等待连接</span>
+      </header>
+      <div class="stats">
+        <div class="stat"><span>区块高度</span><strong id="stat-height">0</strong></div>
+        <div class="stat"><span>出块难度</span><strong id="stat-difficulty">--</strong></div>
+        <div class="stat"><span>全网算力</span><strong id="stat-hashrate">0 H/s</strong></div>
+        <div class="stat"><span>在线 / 报名</span><strong id="stat-online">0 / 0</strong></div>
+        <div class="stat"><span>待打包交易</span><strong id="stat-mempool">0</strong></div>
+        <div class="stat"><span>下一块奖励</span><strong id="stat-subsidy">0</strong></div>
+      </div>
+      <p class="job-line" id="chain-line">正在读取链上数据…</p>
+    </section>
+
+    <section class="panel">
+      <header class="panel-head"><h2><svg class="icon"><use href="#i-megaphone"/></svg>课堂通知</h2></header>
+      <form class="form" id="announce-form">
+        <label>通知内容（最多 120 字）
+          <input id="announce-message" maxlength="120" required autocomplete="off" placeholder="例如：先停一下，我们讲梅克尔树">
+        </label>
+        <button type="submit" class="primary"><svg class="icon"><use href="#i-megaphone"/></svg>发布通知</button>
+      </form>
+      <ul class="list" id="event-list"></ul>
+    </section>
+
+    <section class="panel panel-wide">
+      <header class="panel-head">
+        <h2><svg class="icon"><use href="#i-play"/></svg>课堂操作</h2>
+        <span class="muted small">新开一局会清空链上余额、藏品与红包，学生保留昵称和钱包</span>
+      </header>
+      <div class="action-row">
+        <button type="button" class="primary" id="reset-round"><svg class="icon"><use href="#i-refresh"/></svg>开始新一局</button>
+        <button type="button" class="ghost" id="export-wide"><svg class="icon"><use href="#i-download"/></svg>导出成绩 CSV</button>
+        <a class="ghost" href="/bigscreen" target="_blank"><svg class="icon"><use href="#i-monitor"/></svg>打开投影大屏</a>
+      </div>
+    </section>
+
+    <section class="panel panel-wide">
+      <header class="panel-head">
+        <h2><svg class="icon"><use href="#i-trophy"/></svg>参赛学生</h2>
+        <span class="muted small" id="player-count"></span>
+      </header>
+      <div class="table-wrap">
+        <table class="table" id="players">
+          <thead>
+            <tr>
+              <th>名次</th><th>昵称</th><th>余额</th><th>累计挖矿</th><th>实时算力</th>
+              <th>区块</th><th>状态</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel panel-wide">
+      <header class="panel-head">
+        <h2><svg class="icon"><use href="#i-clock"/></svg>课堂参数</h2>
+        <button type="button" class="ghost" id="reload-settings"><svg class="icon"><use href="#i-refresh"/></svg>恢复当前值</button>
+      </header>
+      <form class="form settings-form" id="settings-form">
+        <label>出块难度固定值（留空为自动调整）
+          <input id="setting-override" type="number" min="4" max="56" inputmode="numeric" autocomplete="off" placeholder="自动">
+        </label>
+        <label>自动难度上限
+          <input id="setting-difficulty-max" type="number" min="4" max="56" required inputmode="numeric">
+        </label>
+        <label>目标出块时间（秒）
+          <input id="setting-target-seconds" type="number" min="1" max="3600" required inputmode="numeric">
+        </label>
+        <label>难度调整周期（块）
+          <input id="setting-retarget-blocks" type="number" min="1" max="2016" required inputmode="numeric">
+        </label>
+        <label>停滞降难度（秒）
+          <input id="setting-stall-seconds" type="number" min="0" max="86400" required inputmode="numeric">
+        </label>
+        <label>每块基础奖励（币）
+          <input id="setting-reward" required inputmode="decimal" autocomplete="off">
+        </label>
+        <label>奖励减半周期（块）
+          <input id="setting-halving" type="number" min="1" max="1000000" required inputmode="numeric">
+        </label>
+        <label>发现者额外奖励（%）
+          <input id="setting-bonus" type="number" min="0" max="90" required inputmode="numeric">
+        </label>
+        <label>手续费下限（币）
+          <input id="setting-min-fee" required inputmode="decimal" autocomplete="off">
+        </label>
+        <label>份额目标时间（秒）
+          <input id="setting-share-seconds" type="number" min="0.2" max="60" step="0.1" required inputmode="decimal">
+        </label>
+        <label>每人藏品上限
+          <input id="setting-nft-limit" type="number" min="1" max="1000" required inputmode="numeric">
+        </label>
+        <label>红包有效期（分钟）
+          <input id="setting-packet-minutes" type="number" min="1" max="1440" required inputmode="numeric">
+        </label>
+        <div class="form-actions">
+          <button type="submit" class="primary"><svg class="icon"><use href="#i-refresh"/></svg>保存参数</button>
+          <span class="muted small">参数立即生效，学生的挖矿作业会自动切换到新难度。</span>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+
+  <div class="overlay" id="login-overlay">
+    <form class="login-card" id="login-form">
+      <h1>教师控制台</h1>
+      <p class="muted">口令在服务器启动时打印，也可以打开配置文件查看 admin_key。</p>
+      <label>教师口令<input id="login-key" required autocomplete="off" placeholder="例如 A1B2C3"></label>
+      <button type="submit" class="primary"><svg class="icon"><use href="#i-shield"/></svg>进入控制台</button>
+      <p class="error" id="login-error" hidden></p>
+    </form>
+  </div>
+
+  <script src="/static/client.js"></script>
+  <script src="/static/teacher.js"></script>
+</body>
+</html>

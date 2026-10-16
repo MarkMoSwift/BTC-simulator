@@ -1,59 +1,90 @@
+"""钱包：浏览器的 P-256 私钥签名，服务器只保存公钥与地址。"""
 from __future__ import annotations
 
 import hashlib
-import time
-from dataclasses import dataclass
+import secrets
 
-from ecdsa import BadSignatureError, SECP256k1, SigningKey, VerifyingKey
+from ecdsa import BadSignatureError, NIST256p, SigningKey, VerifyingKey
+from ecdsa.util import sigdecode_string, sigencode_string
+
+ADDRESS_PREFIX = "sim"
+PUBLIC_KEY_BYTES = 64
+SIGNATURE_BYTES = 64
 
 
-@dataclass(frozen=True)
-class WalletRecord:
-    name: str
-    address: str
-    public_key: str
-    private_key: str
-    created_at: int
-    is_default: bool = True
+class SignatureError(ValueError):
+    """签名或公钥格式不合法。"""
 
 
 def address_from_public_key(public_key_hex: str) -> str:
-    """In this simulator the wallet address is the uncompressed public key hex.
-
-    This mirrors the hand-written design note "address equals public key" and
-    keeps signature validation transparent for teaching. It is not a real BTC
-    address format.
-    """
-    return public_key_hex
+    """地址 = "sim" + sha256(公钥)[:20] 字节，模仿"地址来自公钥哈希"。"""
+    raw = bytes.fromhex(public_key_hex)
+    return ADDRESS_PREFIX + hashlib.sha256(raw).hexdigest()[:40]
 
 
-def generate_wallet(name: str = "default") -> WalletRecord:
-    signing_key = SigningKey.generate(curve=SECP256k1)
-    verifying_key = signing_key.verifying_key
-    public_key = verifying_key.to_string().hex()
-    private_key = signing_key.to_string().hex()
-    return WalletRecord(
-        name=name,
-        address=address_from_public_key(public_key),
-        public_key=public_key,
-        private_key=private_key,
-        created_at=int(time.time()),
-        is_default=True,
-    )
+def public_key_from_private(private_key_hex: str) -> str:
+    signing_key = SigningKey.from_string(_private_bytes(private_key_hex), curve=NIST256p)
+    return signing_key.get_verifying_key().to_string().hex()
 
 
-def sign_payload(private_key_hex: str, payload: bytes) -> str:
-    signing_key = SigningKey.from_string(bytes.fromhex(private_key_hex), curve=SECP256k1)
-    return signing_key.sign_deterministic(payload, hashfunc=hashlib.sha256).hex()
+def signature_digest(message: bytes) -> bytes:
+    return hashlib.sha256(message).digest()
 
 
-def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
+def verify_signature(public_key_hex: str, signature_hex: str, message: bytes) -> bool:
     try:
-        verifying_key = VerifyingKey.from_string(bytes.fromhex(public_key_hex), curve=SECP256k1)
-        return verifying_key.verify(
-            bytes.fromhex(signature_hex),
-            payload,
-            hashfunc=hashlib.sha256,
+        verifying_key = VerifyingKey.from_string(
+            _public_bytes(public_key_hex), curve=NIST256p, validate_point=True
         )
-    except (BadSignatureError, ValueError):
+        return verifying_key.verify_digest(
+            signature=_signature_bytes(signature_hex),
+            digest=signature_digest(message),
+            sigdecode=sigdecode_string,
+            allow_truncate=False,
+        )
+    except (BadSignatureError, SignatureError, AssertionError):
         return False
+
+
+def sign_message(private_key_hex: str, message: bytes) -> str:
+    signing_key = SigningKey.from_string(_private_bytes(private_key_hex), curve=NIST256p)
+    signature = signing_key.sign_digest_deterministic(
+        signature_digest(message),
+        hashfunc=hashlib.sha256,
+        sigencode=sigencode_string,
+    )
+    return signature.hex()
+
+
+def generate_private_key() -> str:
+    return secrets.token_bytes(32).hex()
+
+
+def _private_bytes(private_key_hex: str) -> bytes:
+    try:
+        raw = bytes.fromhex(str(private_key_hex).strip())
+    except ValueError as exc:
+        raise SignatureError("私钥不是合法十六进制") from exc
+    if len(raw) != 32:
+        raise SignatureError("私钥必须是 32 字节")
+    return raw
+
+
+def _public_bytes(public_key_hex: str) -> bytes:
+    try:
+        raw = bytes.fromhex(str(public_key_hex).strip())
+    except ValueError as exc:
+        raise SignatureError("公钥不是合法十六进制") from exc
+    if len(raw) != PUBLIC_KEY_BYTES:
+        raise SignatureError("公钥必须是 64 字节的 P-256 点")
+    return raw
+
+
+def _signature_bytes(signature_hex: str) -> bytes:
+    try:
+        raw = bytes.fromhex(str(signature_hex).strip())
+    except ValueError as exc:
+        raise SignatureError("签名不是合法十六进制") from exc
+    if len(raw) != SIGNATURE_BYTES:
+        raise SignatureError("签名必须是 64 字节的 r||s")
+    return raw
