@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import secrets
 import time
 from collections import deque
@@ -82,7 +83,11 @@ class Job:
 @dataclass
 class PlayerMining:
     address: str
+    # 下一份作业要下发的份额难度，由 _next_share_bits 按实测算力算出。
     share_bits: int
+    # 已经下发、同学正在按它搜索的份额难度：验证份额和记录工作量都按它算。
+    # 调整只影响下一份作业，否则服务器刚把难度调高，就会把同学按旧目标找到的份额判成不合格。
+    issued_share_bits: int
     work: int = 0
     shares: int = 0
     best_share_bits: int = 0
@@ -190,7 +195,7 @@ class MiningPool:
             return self._reject("提交过于频繁")
 
         player = self._ensure_player(address)
-        share_bits = self._clamp_share_bits(player.share_bits, job.difficulty)
+        share_bits = self._clamp_share_bits(player.issued_share_bits, job.difficulty)
         key = f"{job_id}:{address}:{nonce}"
         if key in self.seen_shares:
             return self._reject("这个 nonce 已经提交过")
@@ -207,10 +212,10 @@ class MiningPool:
         player.unflushed_shares += 1
         player.best_share_bits = max(player.best_share_bits, actual_bits(digest))
         player.samples.append((now, work))
-        previous_share_at = player.last_share_at
         player.last_share_at = now
         self.stage[address] = self.stage.get(address, 0) + work
-        self._adjust_share_bits(player, now, previous_share_at, job.difficulty)
+        rate = player.hashrate(now)
+        player.share_bits = self._next_share_bits(rate, job.difficulty)
 
         result: dict[str, Any] = {
             "accepted": True,
@@ -219,7 +224,7 @@ class MiningPool:
             "next_share_bits": player.share_bits,
             "work": work,
             "hash": digest,
-            "hashrate": player.hashrate(now),
+            "hashrate": rate,
             "block": None,
             "balance": self.chain.state.balance_of(address),
         }
@@ -233,7 +238,7 @@ class MiningPool:
         miners = {
             address: {
                 "hashrate": player.hashrate(now),
-                "share_bits": player.share_bits,
+                "share_bits": player.issued_share_bits,
                 "work": player.work,
                 "shares": player.shares,
                 "best_share_bits": player.best_share_bits,
@@ -259,7 +264,7 @@ class MiningPool:
         player = self._ensure_player(address)
         return {
             "hashrate": player.hashrate(now),
-            "share_bits": player.share_bits,
+            "share_bits": player.issued_share_bits,
             "work": player.work,
             "shares": player.shares,
             "best_share_bits": player.best_share_bits,
@@ -345,6 +350,7 @@ class MiningPool:
     def _job_payload(self, job: Job, address: str) -> dict[str, Any]:
         player = self._ensure_player(address)
         share_bits = self._clamp_share_bits(player.share_bits, job.difficulty)
+        player.issued_share_bits = share_bits
         coinbase = job.coinbase(address)
         tx_ids = [coinbase["tx_id"], *(tx["tx_id"] for tx in job.transactions)]
         return {
@@ -413,7 +419,11 @@ class MiningPool:
     def _ensure_player(self, address: str) -> PlayerMining:
         player = self.players.get(address)
         if player is None:
-            player = PlayerMining(address=address, share_bits=self.settings.initial_share_bits)
+            player = PlayerMining(
+                address=address,
+                share_bits=self.settings.initial_share_bits,
+                issued_share_bits=self.settings.initial_share_bits,
+            )
             self.players[address] = player
         return player
 
@@ -421,19 +431,14 @@ class MiningPool:
         upper = min(self.settings.share_bits_max, max(job_difficulty, self.settings.share_bits_min))
         return min(max(int(bits), self.settings.share_bits_min), upper)
 
-    def _adjust_share_bits(
-        self, player: PlayerMining, now: float, previous_share_at: float, job_difficulty: int
-    ) -> None:
-        """自动变速：份额来得太快就加一位难度，太慢就减一位，目标是每人两秒交一次。"""
-        if previous_share_at <= 0:
-            return
-        target = self.settings.share_target_seconds
-        interval = now - previous_share_at
-        if interval < target * 0.6:
-            player.share_bits += 1
-        elif interval > target * 2.0:
-            player.share_bits -= 1
-        player.share_bits = self._clamp_share_bits(player.share_bits, job_difficulty)
+    def _next_share_bits(self, rate: float, job_difficulty: int) -> int:
+        """份额难度直接按实测算力定：目标是每个同学大约每 share_target_seconds 交一份份额。
+
+        份额难度每差一位，预期份额间隔就差一倍，所以按当前算力一次算准，
+        比一位一位地试要快得多，也不会在难度上限上停下来。
+        """
+        wanted = math.ceil(math.log2(rate * self.settings.share_target_seconds))
+        return self._clamp_share_bits(wanted, job_difficulty)
 
     def _allow_submission(self, address: str, now: float) -> bool:
         rate = float(max(self.settings.max_shares_per_second, 1))

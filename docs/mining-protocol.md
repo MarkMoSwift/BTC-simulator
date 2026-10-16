@@ -89,7 +89,7 @@ Content-Type: application/json
 | `timestamp` | 区块时间戳（秒，写进区块头的是 32 位小端） |
 | `difficulty` | 出块难度：哈希前导零位数 |
 | `miner_tag` | 由你的地址推导出的 32 位标记，已经在区块头里 |
-| `share_bits` | 你的份额难度，比出块难度低，服务端按你的速度自动调整 |
+| `share_bits` | 这份作业给你的份额难度，比出块难度低；它由服务端按你的速度算好，作业期间不再变 |
 | `share_target` | 份额目标值（64 位十六进制） |
 | `block_target` | 出块目标值（64 位十六进制） |
 | `subsidy` | 本块基础奖励（聪） |
@@ -185,9 +185,13 @@ Content-Type: application/json
 
 收到 `job` 字段要立刻切换作业；收到 `block` 表示这个区块已经上链。
 
-`share_bits` 是这一份份额的难度，`next_share_bits` 是服务端根据你最近的提交速度算出的
-下一次该用的难度：份额交得太密会往上涨，太稀会往下掉。把它当提示用，重新取一份作业，
-或者自己按 `target = (1 << (256 - bits)) - 1` 换算出新目标。
+`share_bits` 是这一份份额用的难度，和你手上作业里的 `share_target` 对应：作业没换，
+服务端就一直按它验证和记账。`next_share_bits` 是服务端按你的实测算力算出的下一份作业难度，
+目标是让你大约每 `share_target_seconds`（默认 2 秒）交一份份额。难度每差一位，预期份额间隔
+就差一倍，所以它是一次算准的，不是一位一位地试。
+
+想提前用上新难度，重新取一份作业，或者自己按 `target = (1 << (256 - bits)) - 1` 换算。
+一直按旧作业的旧目标搜索也不会被拒收，只是每一份份额都还按旧难度记账。
 
 ### 奖励怎么分
 
@@ -207,7 +211,7 @@ Content-Type: application/json
 
 | 方向 | 消息 | 说明 |
 | --- | --- | --- |
-| 页面 → Worker | `{type: "job", job}` | 新作业，收到后从头开始搜索 |
+| 页面 → Worker | `{type: "job", job}` | 新作业，收到后从头开始搜索，并且要让上一批停下来 |
 | 页面 → Worker | `{type: "stop"}` | 暂停挖矿 |
 | Worker → 页面 | `{type: "share", nonce}` | 提交份额，页面会带上当前 `job_id` 发给服务器 |
 | Worker → 页面 | `{type: "progress", hashes}` | 自上次上报以来算过的哈希数，用来显示实时算力 |

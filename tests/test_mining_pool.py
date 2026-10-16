@@ -70,6 +70,73 @@ def test_anyone_can_rebuild_the_header_from_a_job(tmp_path) -> None:
     assert result["hash"] == block_hash(header_from_job(job, nonce))
 
 
+def test_share_uses_the_difficulty_from_its_job(tmp_path) -> None:
+    """份额难度只改下一份作业：还在按旧目标搜索的份额照收，并按旧难度记账。"""
+    service = make_service(
+        tmp_path,
+        chain={"initial_difficulty": 20},
+        pool={
+            "initial_share_bits": 8,
+            "share_bits_min": 8,
+            "share_bits_max": 12,
+            "share_target_seconds": 2.0,
+        },
+    )
+    player = make_player(service, "alice")
+    now = time.time()
+    job = service.issue_job(player.address, now)
+    assert job["share_bits"] == 8
+    easy = [nonce for nonce in range(200_000) if meets_bits(block_hash(header_from_job(job, nonce)), 8)]
+
+    first = service.submit_share(player.address, job["job_id"], easy[0], now + 2.0)
+    assert first["accepted"], first["reason"]
+    assert first["share_bits"] == 8
+    assert first["next_share_bits"] == 9
+
+    second = service.submit_share(player.address, job["job_id"], easy[1], now + 2.5)
+    assert second["accepted"], second["reason"]
+    assert second["share_bits"] == 8
+    assert second["work"] == 1 << 8
+
+    third = service.submit_share(player.address, job["job_id"], easy[2], now + 4.0)
+    assert third["accepted"], third["reason"]
+    assert third["share_bits"] == 8
+    assert third["next_share_bits"] == 10
+
+    harder = service.issue_job(player.address, now + 4.5)
+    assert harder["share_bits"] == 10
+    below_new_target = next(
+        nonce for nonce in easy[3:] if not meets_bits(block_hash(header_from_job(harder, nonce)), 10)
+    )
+    rejected = service.submit_share(player.address, harder["job_id"], below_new_target, now + 6.0)
+    assert rejected["accepted"] is False
+    assert "份额难度" in rejected["reason"]
+
+
+def test_slow_miner_gets_an_easier_share_target(tmp_path) -> None:
+    """交得稀的同学份额难度往下走，目标始终是每人每份份额两秒。"""
+    service = make_service(
+        tmp_path,
+        chain={"initial_difficulty": 24},
+        pool={
+            "initial_share_bits": 16,
+            "share_bits_min": 8,
+            "share_bits_max": 24,
+            "share_target_seconds": 2.0,
+        },
+    )
+    player = make_player(service, "bob")
+    now = time.time()
+    job = service.issue_job(player.address, now)
+    first = find_nonce(job, 16)
+    second = find_nonce(job, 16, start=first + 1)
+
+    assert service.submit_share(player.address, job["job_id"], first, now + 1.0)["accepted"]
+    slow = service.submit_share(player.address, job["job_id"], second, now + 20.0)
+    assert slow["accepted"], slow["reason"]
+    assert slow["next_share_bits"] < job["share_bits"]
+
+
 def test_duplicate_and_stale_shares_are_rejected(tmp_path) -> None:
     service = make_service(tmp_path, chain={"initial_difficulty": 16})
     player = make_player(service, "alice")
