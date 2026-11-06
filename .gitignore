@@ -4,5 +4,21 @@ __pycache__/
 .venv/
 venv/
 
-config.json
+config*.json
+!config.example.json
+configs/
+invite.json
+*.invite*.json
+*.wallet.key
+classroom-wallet.json
+key.pem
+.env
+.env.*
+!.env.example
 data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3

@@ -8,14 +8,18 @@ import io
 import re
 import secrets
 import time
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from app.config import (
     ConfigError,
+    SESSION_VERSION,
     Settings,
     VERSION,
     load_settings,
+    resolve_config_path,
+    resolve_session_storage,
     resolve_storage_path,
     save_settings,
     settings_from_raw,
@@ -23,13 +27,16 @@ from app.config import (
 )
 from app.core.block import target_for_bits
 from app.core.chain import Blockchain
+from app.core.local_miner import LocalMiner
 from app.core.mempool import Mempool
 from app.core.mining_pool import MiningPool
 from app.core.redpacket import amount_for_index
-from app.core.wallet import address_from_public_key, verify_signature
+from app.core.transaction import compute_tx_id, tx_bytes
+from app.core.wallet import LocalWallet, address_from_public_key, verify_signature
 from app.storage.sqlite_store import SQLiteStore
 from app.units import format_coins
 from app.web.hub import ConnectionHub
+from app.web.peers import Peers
 
 NICKNAME_PATTERN = re.compile(r"^[\w\u4e00-\u9fff-]{1,12}$")
 LOGIN_NONCE_SECONDS = 300
@@ -46,14 +53,29 @@ class ClassroomError(Exception):
 
 
 class ClassroomService:
-    def __init__(self, config_path: str | Path = "config.json"):
-        self.config_path = Path(config_path)
+    def __init__(
+        self, config_path: str | Path | None = None, *, native_wallet: bool = True,
+        builtin_miner: bool = True,
+    ):
+        self.config_path = resolve_config_path(config_path)
         self.settings: Settings = load_settings(self.config_path)
-        self.store = SQLiteStore(resolve_storage_path(self.settings, self.config_path))
+        session = self.settings.session()
+        if self.settings.peers and session is None:
+            raise ConfigError("当前版本尚未实现独立节点间的 P2P 同步，请将 peers 设为 []；不会自动连接列表中的节点")
+        storage = (
+            resolve_session_storage(self.settings, self.config_path, session)
+            if session else resolve_storage_path(self.settings, self.config_path)
+        )
+        self.store = SQLiteStore(storage)
+        if session and self.settings.reset_chain_on_start:
+            self.store.reset_session()
         self.hub = ConnectionHub()
+        self.screen_hub = ConnectionHub()
         self.events: list[dict[str, Any]] = []
-        self.chain = Blockchain(self.settings.chain, self.store, log=self._log)
+        self.chain = Blockchain(self.settings.chain, self.store, log=self._log, session=session)
+        self._observed_tip = self.chain.tip_hash
         self.mempool = Mempool(self.store, lambda: self.chain.state, log=self._log)
+        self.peers = Peers(self.chain, self.settings.peers, self._on_peer_chain, self.submit_transaction)
         self.pool = MiningPool(
             self.chain,
             self.mempool,
@@ -68,14 +90,28 @@ class ClassroomService:
         self.announcement: dict[str, Any] | None = None
         self._tick_task: asyncio.Task[None] | None = None
         self._last_flush = time.time()
+        self.wallet = (
+            LocalWallet(self.config_path.with_suffix(".wallet.key")) if session and native_wallet else None
+        )
+        self.local_miner = (
+            LocalMiner(self._local_job, self._local_solution) if self.wallet and builtin_miner else None
+        )
 
     # ---------- 生命周期 ----------
     async def start(self) -> None:
         await self.hub.start()
+        await self.screen_hub.start()
+        if self.chain.session is not None:
+            self.peers.start()
+        if self.wallet is not None:
+            self._local_player()
         if self._tick_task is None:
             self._tick_task = asyncio.create_task(self._tick_loop(), name="classroom-tick")
 
     async def shutdown(self) -> None:
+        if self.local_miner is not None:
+            await self.local_miner.stop()
+        await self.peers.stop()
         if self._tick_task is not None:
             self._tick_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -83,13 +119,68 @@ class ClassroomService:
             self._tick_task = None
         self.pool.flush_stats()
         await self.hub.stop()
+        await self.screen_hub.stop()
         self.store.close()
+
+    def _local_player(self) -> dict[str, Any]:
+        if self.wallet is None:
+            raise ClassroomError("此节点没有本机钱包")
+        player = self.store.get_player_by_address(self.wallet.address)
+        if player is None:
+            nickname = "本机-" + self.wallet.address[3:11]
+            self.store.upsert_player(nickname, self.wallet.address, self.wallet.public_key, int(time.time()))
+            player = self.store.get_player_by_address(self.wallet.address)
+        return player
+
+    def local_login(self, *, internal: bool = False) -> dict[str, Any]:
+        player = self._local_player()
+        token = secrets.token_urlsafe(24)
+        self.sessions[token] = {"nickname": player["nickname"], "role": "student",
+                                "expires_at": float("inf") if internal else time.time() + SESSION_SECONDS}
+        return {"token": token, "player": self.player_view_by_record(player)}
+
+    def _local_job(self) -> dict[str, Any]:
+        try:
+            return self.issue_job(self.wallet.address)
+        except ClassroomError:
+            return {}
+
+    def _local_solution(self, job: dict[str, Any], nonce: int) -> dict[str, Any]:
+        return self.submit_share(self.wallet.address, job["job_id"], nonce, job["share_bits"])
+
+    def local_transaction(self, fields: dict[str, Any]) -> dict[str, Any]:
+        if self.wallet is None:
+            raise ClassroomError("此节点没有本机钱包")
+        tx = {
+            **fields, "sender": self.wallet.address, "public_key": self.wallet.public_key,
+            "domain": self.chain.state.domain, "timestamp": int(time.time()),
+        }
+        tx.pop("tx_id", None)
+        tx.pop("signature", None)
+        tx["tx_id"] = compute_tx_id(tx)
+        tx["signature"] = self.wallet.sign(tx_bytes(tx))
+        return self.submit_transaction(tx)
+
+    def connect_peer(self, address: str) -> dict[str, Any]:
+        if self.chain.session is None:
+            raise ClassroomError("请选择课堂场次")
+        normalized = settings_from_raw({"peers": [address]}).peers[0]
+        if normalized in self.settings.peers:
+            return {"peers": self.settings.peers}
+        updated = replace(self.settings, peers=[*self.settings.peers, normalized])
+        save_settings(updated, self.config_path)
+        self.settings = updated
+        self.peers.addresses = updated.peers
+        self.peers.tasks.append(asyncio.create_task(self.peers.dial(normalized)))
+        return {"peers": updated.peers}
 
     def _log(self, message: str) -> None:
         self.events.append({"at": int(time.time()), "message": message})
         del self.events[:-200]
 
     def _on_block(self, block: dict[str, Any]) -> None:
+        self._observed_tip = self.chain.tip_hash
+        self.peers.relay({"type": "tip", "hash": self.chain.tip_hash})
         coinbase = block["transactions"][0]
         self.publish(
             "block",
@@ -106,20 +197,36 @@ class ClassroomService:
             },
         )
 
+    def _on_peer_chain(self) -> None:
+        self.mempool.reload()
+        reorganized = self._observed_tip not in self.chain.hashes
+        self._observed_tip = self.chain.tip_hash
+        self.peers.relay({"type": "tip", "hash": self.chain.tip_hash})
+        self.publish("chain_changed", {"height": self.chain.height, "hash": self.chain.tip_hash,
+                                      "reorganized": reorganized})
+
     def publish(self, kind: str, data: dict[str, Any]) -> None:
         self.hub.publish({"type": kind, "data": data})
+        if kind != "tick" and self.screen_hub.connections:
+            self.screen_hub.publish({"type": kind, "data": data})
 
     async def _tick_loop(self) -> None:
         while True:
             await asyncio.sleep(TICK_SECONDS)
             now = time.time()
-            self.pool.tick(now)
+            if self.pool.tick(now)["refreshed"] and self.chain.session:
+                self.publish("mining_job_changed", {})
             self._expire_reservations(now)
             self._expire_sessions(now)
             if now - self._last_flush >= FLUSH_SECONDS:
                 self._last_flush = now
                 self.pool.flush_stats()
-            self.publish("tick", self.live_tick(now))
+            if self.hub.connections or self.screen_hub.connections:
+                tick = self.live_tick(now)
+                if self.hub.connections:
+                    self.publish("tick", tick)
+                if self.screen_hub.connections:
+                    self.screen_hub.publish({"type": "tick", "data": self.screen_tick(now, tick)})
 
     def _expire_reservations(self, now: float) -> None:
         for packet_id, reservations in list(self.claim_reservations.items()):
@@ -184,6 +291,8 @@ class ClassroomService:
         return {"token": token, "player": self.player_view(nickname)}
 
     def admin_login(self, key: str) -> dict[str, Any]:
+        if self.chain.session is not None:
+            raise ClassroomError("当前场次没有教师管理权限")
         if not self.settings.admin_key or not secrets.compare_digest(key.strip(), self.settings.admin_key):
             raise ClassroomError("教师口令不正确")
         token = secrets.token_urlsafe(24)
@@ -237,19 +346,31 @@ class ClassroomService:
 
     def live_tick(self, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
-        return {
+        players = self.store.list_players()
+        tick = {
             "chain": self.chain.snapshot(),
             "mempool": self.mempool.stats(),
-            "pool": self.pool.stats(now),
-            "leaderboard": self.leaderboard(now),
             "packets": self.packets_view(now),
             "market": self.market_view()["listings"],
             "auctions": self.auctions_view(now),
+            "announcement": self.announcement,
             "online": sum(
                 1
-                for player in self.store.list_players()
+                for player in players
                 if now - int(player["last_seen"]) <= ONLINE_SECONDS
             ),
+            "names": {player["address"]: player["nickname"] for player in players},
+        }
+        if self.chain.session is None:
+            tick.update(pool=self.pool.stats(now), leaderboard=self.leaderboard(now))
+        return tick
+
+    def screen_tick(self, now: float | None = None, tick: dict[str, Any] | None = None) -> dict[str, Any]:
+        common = self.live_tick(now) if tick is None else tick
+        return {
+            **common,
+            "leaderboard": common.get("leaderboard") or self.leaderboard(now),
+            "recent_blocks": [block for block in self.recent_blocks(limit=5) if block["height"]],
         }
 
     def leaderboard(self, now: float | None = None) -> dict[str, Any]:
@@ -257,24 +378,29 @@ class ClassroomService:
         pool_stats = self.pool.stats(now)["miners"]
         state = self.chain.state
         rows: list[dict[str, Any]] = []
-        for player in self.store.list_players():
-            address = player["address"]
+        players = {player["address"]: player for player in self.store.list_players()}
+        addresses = list(players)
+        if self.chain.session:
+            addresses.extend(address for address in state.mining_income if address not in players)
+        for address in addresses:
+            player = players.get(address, {})
             mining = pool_stats.get(address, {})
             rows.append(
                 {
-                    "nickname": player["nickname"],
+                    "nickname": player.get("nickname", address[:12] + "…"),
                     "address": address,
                     "hashrate": float(mining.get("hashrate", 0.0)),
                     "share_bits": int(mining.get("share_bits", self.settings.pool.initial_share_bits)),
-                    "best_share_bits": int(mining.get("best_share_bits", player["best_share_bits"])),
-                    "blocks_found": int(mining.get("blocks_found", 0)) + int(player["blocks_found"]),
+                    "best_share_bits": int(mining.get("best_share_bits", player.get("best_share_bits", 0))),
+                    "blocks_found": (state.mined_blocks.get(address, 0) if self.chain.session
+                                     else int(mining.get("blocks_found", 0)) + int(player["blocks_found"])),
                     "session_work": int(mining.get("work", 0)),
-                    "total_work": int(player["total_work"]),
+                    "total_work": int(player.get("total_work", 0)),
                     "mined": int(state.mining_income.get(address, 0)),
                     "balance": int(state.balance_of(address)),
                     "nfts": len(state.nfts_of(address)),
-                    "online": now - int(player["last_seen"]) <= ONLINE_SECONDS,
-                    "banned": bool(player["banned"]),
+                    "online": now - int(player.get("last_seen", 0)) <= ONLINE_SECONDS,
+                    "banned": bool(player.get("banned", False)),
                 }
             )
         by_hashrate = sorted(rows, key=lambda row: (-row["hashrate"], -row["mined"], row["nickname"]))
@@ -301,6 +427,8 @@ class ClassroomService:
         state = self.chain.state
         now = time.time()
         mining = self.pool.miner_stats(address, now)
+        if self.chain.session:
+            mining["blocks_found"] = state.mined_blocks.get(address, 0)
         return {
             "nickname": player["nickname"],
             "address": address,
@@ -331,7 +459,10 @@ class ClassroomService:
                 for index, claim in packet["claims"].items()
                 if claim["receiver"] == address
             ][::-1],
-            "transactions": self.store.list_transactions(address=address, limit=12),
+            "transactions": [
+                {**tx, "confirmations": self.chain.height - tx["block_height"] + 1}
+                for tx in self.store.list_transactions(address=address, limit=12)
+            ],
         }
 
     def _nft_view(self, nft: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +475,7 @@ class ClassroomService:
             "token_id": nft["token_id"],
             "name": nft["name"],
             "seed": nft["seed"],
+            "thumbnail_id": nft.get("thumbnail_id"),
             "owner": nft["owner"],
             "created_at": nft["created_at"],
             "mint_height": nft["mint_height"],
@@ -355,7 +487,7 @@ class ClassroomService:
         now = now if now is not None else time.time()
         names = self.nicknames()
         active = [self._auction_view(auction, names, now) for auction in self.chain.state.auctions.values()]
-        active.sort(key=lambda item: item["ends_at"])
+        active.sort(key=lambda item: item["ends_height"] or item["ends_at"])
         history = [
             {
                 **record,
@@ -373,6 +505,7 @@ class ClassroomService:
             "auction_id": auction["auction_id"],
             "token_id": auction["token_id"],
             "name": nft["name"] if nft else "未知藏品",
+            "thumbnail_id": nft.get("thumbnail_id") if nft else None,
             "seller": auction["seller"],
             "seller_name": names.get(auction["seller"], "未知"),
             "reserve_price": int(auction["reserve_price"]),
@@ -382,8 +515,10 @@ class ClassroomService:
             "highest_bidder_name": names.get(auction["highest_bidder"], "") if auction["highest_bidder"] else "",
             "bid_count": int(auction["bid_count"]),
             "created_at": int(auction["created_at"]),
-            "ends_at": int(auction["ends_at"]),
-            "seconds_left": max(int(auction["ends_at"]) - int(now), 0),
+            "ends_at": auction["ends_at"],
+            "ends_height": auction["ends_height"],
+            "blocks_left": (auction["ends_height"] - self.chain.height if self.chain.session else None),
+            "seconds_left": (None if self.chain.session else max(auction["ends_at"] - int(now), 0)),
         }
 
     def _packet_view(self, packet: dict[str, Any], now: float) -> dict[str, Any]:
@@ -400,7 +535,7 @@ class ClassroomService:
             status = "refunded"
         elif len(claims) >= packet["count"]:
             status = "finished"
-        elif now > packet["expires_at"]:
+        elif not self.chain.session and now > packet["expires_at"]:
             status = "expired"
         else:
             status = "active"
@@ -411,7 +546,8 @@ class ClassroomService:
             "count": int(packet["count"]),
             "note": packet["note"],
             "created_at": int(packet["created_at"]),
-            "expires_at": int(packet["expires_at"]),
+            "expires_at": packet["expires_at"],
+            "expires_height": packet["expires_height"],
             "remaining": int(packet["remaining"]),
             "claimed_count": len(claims),
             "claims": claims,
@@ -453,7 +589,9 @@ class ClassroomService:
     def public_state(self) -> dict[str, Any]:
         return {
             "classroom": self.settings.classroom_name,
-            "version": VERSION,
+            "node_name": self.settings.node_name,
+            "version": SESSION_VERSION if self.chain.session else VERSION,
+            "transaction_domain": self.chain.state.domain,
             "chain": self.chain.snapshot(),
             "mempool": self.mempool.stats(),
             "recent_blocks": self.recent_blocks(),
@@ -464,11 +602,16 @@ class ClassroomService:
     # ---------- 交易与挖矿 ----------
     def submit_transaction(self, tx: dict[str, Any]) -> dict[str, Any]:
         tx_id = self.mempool.add(tx)
+        self.peers.relay({"type": "tx", "tx": tx})
         self.publish("mempool", {"tx_id": tx_id, "type": tx["type"]})
         return {"tx_id": tx_id, "mempool": self.mempool.stats()}
 
     def issue_job(self, address: str, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
+        if self.chain.session is not None and now < self.chain.session.start_time:
+            raise ClassroomError("课堂场次尚未开场")
+        if self.chain.session is not None and not self.peers.synced.is_set():
+            raise ClassroomError("正在尝试同步课堂区块")
         self._touch(address, now)
         return self.pool.issue_job(address, now)
 
@@ -500,7 +643,7 @@ class ClassroomService:
         packet = state.packets.get(packet_id)
         if not packet:
             raise ClassroomError("红包不存在")
-        if now > packet["expires_at"]:
+        if (state.height + 1 >= packet["expires_height"] if state.domain else now > packet["expires_at"]):
             raise ClassroomError("红包已过期")
         if packet.get("refunded"):
             raise ClassroomError("红包已经被退回")
@@ -523,7 +666,10 @@ class ClassroomService:
 
     # ---------- 教师操作 ----------
     def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        if self.chain.session:
+            raise ClassroomError("3.0 场次的共识规则不可在运行中修改")
         raw = settings_to_raw(self.settings)
+        raw.update(chain=asdict(self.settings.chain), pool=asdict(self.settings.pool))
         for section in ("chain", "pool"):
             if section in patch:
                 if not isinstance(patch[section], dict):
@@ -580,7 +726,8 @@ class ClassroomService:
 
     def settings_view(self) -> dict[str, Any]:
         raw = settings_to_raw(self.settings)
-        raw["chain"]["difficulty_override"] = self.settings.chain.difficulty_override
+        if not self.chain.session:
+            raw.update(chain=asdict(self.settings.chain), pool=asdict(self.settings.pool))
         raw["current_difficulty"] = self.chain.difficulty_for(self.chain.height + 1)
         raw["current_target"] = target_for_bits(self.chain.difficulty_for(self.chain.height + 1))
         return raw
@@ -645,7 +792,8 @@ class ClassroomService:
         return buffer.getvalue()
 
     def web_urls(self) -> list[str]:
-        return [f"http://{ip}:{self.settings.web_port}" for ip in self.local_addresses()]
+        scheme = "https" if self.settings.tls_certificate_dir else "http"
+        return [f"{scheme}://{ip}:{self.settings.web_port}" for ip in self.local_addresses()]
 
     def local_addresses(self) -> list[str]:
         import socket

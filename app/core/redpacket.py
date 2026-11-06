@@ -1,4 +1,4 @@
-"""链上红包的金额推导：完全由链上数据决定，任何人都能复算。"""
+"""业务实现。"""
 from __future__ import annotations
 
 import hashlib
@@ -8,11 +8,11 @@ _SCALE = 1 << 64
 
 
 class PacketError(ValueError):
-    """红包参数或领取规则不合法。"""
+    """PacketError。"""
 
 
 def derive_amounts(packet_id: str, total_sat: int, count: int) -> list[int]:
-    """拼手气红包：每人至少 MIN_CLAIM_SAT，合计精确等于 total_sat。"""
+    """derive_amounts。"""
     if count < 1:
         raise PacketError("红包个数必须大于 0")
     if total_sat < count * MIN_CLAIM_SAT:

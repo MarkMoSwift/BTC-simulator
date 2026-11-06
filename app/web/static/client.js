@@ -160,19 +160,20 @@
   }
 
   class Feed {
-    constructor(onEvent, onStatus) {
+    constructor(onEvent, onStatus, path = "/ws") {
       this.onEvent = onEvent;
       this.onStatus = onStatus || (() => {});
       this.socket = null;
       this.closed = false;
       this.retry = null;
+      this.path = path;
     }
 
     connect(token) {
       this.closed = false;
       const scheme = global.location.protocol === "https:" ? "wss" : "ws";
       const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      this.socket = new WebSocket(`${scheme}://${global.location.host}/ws${query}`);
+      this.socket = new WebSocket(`${scheme}://${global.location.host}${this.path}${query}`);
       this.socket.onopen = () => this.onStatus(true);
       this.socket.onmessage = (message) => {
         try {

@@ -6,18 +6,35 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.config import VERSION
+from app.config import ConfigError, SESSION_VERSION, VERSION
 from app.core.block import BlockError
 from app.core.state import RuleError
 from app.core.transaction import TxError
 from app.runtime import ClassroomError, ClassroomService
 
 STATIC_DIR = Path(__file__).parent / "static"
+LOOPBACK = {"127.0.0.1", "::1"}
+
+
+def is_local_wallet_host(request: Request) -> bool:
+    return (
+        request.client is not None
+        and request.client.host in LOOPBACK
+        and request.url.hostname in LOOPBACK | {"localhost"}
+        and not any(name in request.headers for name in ("forwarded", "x-forwarded-for", "x-forwarded-host"))
+    )
+
+
+def require_local_wallet_request(request: Request) -> None:
+    if (not is_local_wallet_host(request)
+            or request.headers.get("origin") != f"{request.url.scheme}://{request.url.netloc}"
+            or request.headers.get("x-local-wallet") != "1"):
+        raise HTTPException(status_code=404)
 
 
 class BeginLoginBody(BaseModel):
@@ -37,6 +54,10 @@ class AdminLoginBody(BaseModel):
 
 class TransactionBody(BaseModel):
     tx: dict[str, Any]
+
+
+class PeerBody(BaseModel):
+    address: str = Field(min_length=1, max_length=2048)
 
 
 class ShareBody(BaseModel):
@@ -62,13 +83,14 @@ class SettingsBody(BaseModel):
 def create_app(service: ClassroomService) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        await service.start()
         try:
+            await service.start()
             yield
         finally:
             await service.shutdown()
 
-    app = FastAPI(title="区块链科普模拟器", version=VERSION, docs_url=None, redoc_url=None, lifespan=lifespan)
+    version = SESSION_VERSION if service.chain.session else VERSION
+    app = FastAPI(title="区块链科普模拟器", version=version, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(ClassroomError)
@@ -104,6 +126,16 @@ def create_app(service: ClassroomService) -> FastAPI:
         service.teacher(token)
         return token
 
+    def local_request(request: Request) -> None:
+        if service.wallet is None:
+            raise HTTPException(status_code=404)
+        require_local_wallet_request(request)
+
+    def local_owner(request: Request, token: str) -> None:
+        local_request(request)
+        if service.student(token)["address"] != service.wallet.address:
+            raise HTTPException(status_code=403)
+
     # ---------- 页面 ----------
     @app.get("/")
     async def index() -> FileResponse:
@@ -112,10 +144,6 @@ def create_app(service: ClassroomService) -> FastAPI:
     @app.get("/bigscreen")
     async def bigscreen() -> FileResponse:
         return FileResponse(STATIC_DIR / "bigscreen.html")
-
-    @app.get("/teacher")
-    async def teacher_page() -> FileResponse:
-        return FileResponse(STATIC_DIR / "teacher.html")
 
     # ---------- 公共信息 ----------
     @app.get("/api/public")
@@ -163,6 +191,13 @@ def create_app(service: ClassroomService) -> FastAPI:
     async def market() -> dict[str, Any]:
         return service.market_view()
 
+    @app.get("/api/thumbnails/{image_id}")
+    async def thumbnail(image_id: str) -> Response:
+        image = service.chain.state.thumbnails.get(image_id)
+        if image is None:
+            raise HTTPException(status_code=404)
+        return Response(image, media_type="image/jpeg", headers={"X-Content-Type-Options": "nosniff"})
+
     # ---------- 登录 ----------
     @app.post("/api/auth/begin")
     async def auth_begin(body: BeginLoginBody) -> dict[str, Any]:
@@ -175,6 +210,50 @@ def create_app(service: ClassroomService) -> FastAPI:
     @app.post("/api/auth/teacher")
     async def auth_teacher(body: AdminLoginBody) -> dict[str, Any]:
         return service.admin_login(body.key)
+
+    @app.post("/api/local/wallet")
+    async def local_wallet(request: Request) -> dict[str, Any]:
+        local_request(request)
+        miner = service.local_miner
+        return {**service.local_login(), "running": bool(miner and miner.running),
+                "name": miner.name if miner else "本机矿工"}
+
+    @app.post("/api/local/wallet/status")
+    async def local_wallet_status(request: Request, token: str = Depends(student_token)) -> dict[str, Any]:
+        local_owner(request, token)
+        miner = service.local_miner
+        return {"running": bool(miner and miner.running), "name": miner.name if miner else "本机矿工"}
+
+    @app.post("/api/local/peers")
+    async def local_peer(request: Request, body: PeerBody,
+                         token: str = Depends(student_token)) -> dict[str, Any]:
+        local_owner(request, token)
+        try:
+            return service.connect_peer(body.address)
+        except ConfigError as exc:
+            raise ClassroomError(str(exc)) from exc
+
+    @app.post("/api/local/wallet/transaction")
+    async def local_transaction(request: Request, body: TransactionBody,
+                                token: str = Depends(student_token)) -> dict[str, Any]:
+        local_owner(request, token)
+        return service.local_transaction(body.tx)
+
+    @app.post("/api/local/wallet/mining/{action}")
+    async def local_mining(request: Request, action: str,
+                           token: str = Depends(student_token)) -> dict[str, Any]:
+        local_owner(request, token)
+        miner = service.local_miner
+        if miner is None or action not in {"start", "stop"}:
+            raise HTTPException(status_code=404)
+        try:
+            if action == "start":
+                await miner.start()
+            else:
+                await miner.stop()
+        except ValueError as exc:
+            raise ClassroomError(str(exc)) from exc
+        return {"running": miner.running, "name": miner.name}
 
     # ---------- 学生 ----------
     @app.get("/api/me")
@@ -246,7 +325,31 @@ def create_app(service: ClassroomService) -> FastAPI:
             headers={"Content-Disposition": 'attachment; filename="mining-results.csv"'},
         )
 
+    @app.get("/api/results.csv")
+    async def classroom_export() -> PlainTextResponse:
+        if service.chain.session is None:
+            raise HTTPException(status_code=404)
+        return PlainTextResponse(
+            service.export_results(), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="mining-results.csv"'},
+        )
+
     # ---------- 实时推送 ----------
+    @app.websocket("/p2p")
+    async def websocket_peer(socket: WebSocket) -> None:
+        if service.chain.session is None:
+            await socket.close(code=1008)
+            return
+        await socket.accept()
+        try:
+            await service.peers.exchange(socket.send_text, socket.receive_text)
+        except WebSocketDisconnect:
+            return
+        except (ValueError, TypeError, KeyError, TimeoutError):
+            await socket.close(code=1008)
+        else:
+            await socket.close()
+
     @app.websocket("/ws")
     async def websocket_events(socket: WebSocket, token: str | None = Query(default=None)) -> None:
         await socket.accept()
@@ -263,6 +366,19 @@ def create_app(service: ClassroomService) -> FastAPI:
             pass
         finally:
             service.hub.unregister(socket)
+
+    @app.websocket("/ws/screen")
+    async def websocket_screen(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.send_json({"type": "hello", "data": service.screen_tick()})
+        await service.screen_hub.register(socket)
+        try:
+            while True:
+                await socket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            service.screen_hub.unregister(socket)
 
     return app
 

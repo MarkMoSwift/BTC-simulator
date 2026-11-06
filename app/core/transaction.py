@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.wallet import address_from_public_key, verify_signature
+from app.core.thumbnail import jpeg_thumbnail
 from app.utils.canonical import canonical_bytes, hash_json
 
 HEX64 = 64
@@ -72,13 +73,13 @@ def compute_tx_id(tx: dict[str, Any]) -> str:
     return hash_json(tx_body(tx))
 
 
-def validate_signed_tx(tx: dict[str, Any]) -> None:
+def validate_signed_tx(tx: dict[str, Any], domain: str | None = None) -> None:
     if not isinstance(tx, dict):
         raise TxError("交易必须是对象")
     tx_type = tx.get("type")
-    if tx_type not in _REQUIRED_FIELDS:
+    if not isinstance(tx_type, str) or tx_type not in _REQUIRED_FIELDS:
         raise TxError(f"不支持的交易类型：{tx_type}")
-    _validate_fields(tx, tx_type)
+    _validate_fields(tx, tx_type, domain)
     _validate_sender(tx)
     _validate_tx_id(tx)
     if not verify_signature(tx["public_key"], str(tx.get("signature", "")), tx_bytes(tx)):
@@ -121,8 +122,16 @@ def coinbase_tx_id(tx: dict[str, Any]) -> str:
     return compute_tx_id(tx)
 
 
-def _validate_fields(tx: dict[str, Any], tx_type: str) -> None:
+def _validate_fields(tx: dict[str, Any], tx_type: str, domain: str | None) -> None:
     required = _REQUIRED_FIELDS[tx_type]
+    if domain is not None:
+        required = required | {"domain"}
+        if tx.get("domain") != domain:
+            raise TxError("交易不属于当前课堂场次")
+        if tx_type == "nft_mint":
+            required |= {"quantity", "thumbnail"}
+        if tx_type in {"nft_auction_settle", "packet_refund"}:
+            raise TxError("到期结算由区块自动执行")
     optional = _OPTIONAL_FIELDS if tx_type in _NOTE_TYPES else set()
     allowed = required | optional | {"signature", "tx_id"}
     unknown = set(tx) - allowed
@@ -142,6 +151,12 @@ def _validate_fields(tx: dict[str, Any], tx_type: str) -> None:
     elif tx_type == "nft_mint":
         _require_text(tx, "name", MAX_NAME_LENGTH)
         _require_hex(tx, "seed", length=16)
+        if domain is not None:
+            _require_int(tx, "quantity", 1, 20)
+            try:
+                jpeg_thumbnail(tx["thumbnail"])
+            except ValueError as exc:
+                raise TxError(str(exc)) from exc
     elif tx_type == "nft_list":
         _require_hex(tx, "token_id", length=HEX64)
         _require_int(tx, "price", 1, MAX_AMOUNT_SAT)
@@ -150,7 +165,7 @@ def _validate_fields(tx: dict[str, Any], tx_type: str) -> None:
     elif tx_type == "nft_auction_create":
         _require_hex(tx, "token_id", length=HEX64)
         _require_int(tx, "reserve_price", 1, MAX_AMOUNT_SAT)
-        _require_int(tx, "duration", 1, MAX_AUCTION_SECONDS)
+        _require_int(tx, "duration", 1, 20 if domain is not None else MAX_AUCTION_SECONDS)
     elif tx_type == "nft_auction_cancel":
         _require_hex(tx, "auction_id", length=HEX64)
     elif tx_type == "nft_auction_settle":

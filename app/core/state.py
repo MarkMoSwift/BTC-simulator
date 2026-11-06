@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from app.config import ChainSettings
 from app.core.redpacket import PacketError, amount_for_index
+from app.core.thumbnail import jpeg_thumbnail
 from app.core.transaction import (
     COINBASE,
     FEE_FREE_TX_TYPES,
@@ -14,6 +15,7 @@ from app.core.transaction import (
     validate_signed_tx,
 )
 from app.units import format_coins
+from app.utils.canonical import hash_json, sha256d_hex
 
 LogFn = Callable[[str], None]
 
@@ -26,6 +28,7 @@ MIN_BID_PERCENT = 110
 SNIPE_EXTENSION_WINDOW = 30
 SNIPE_EXTENSION_SECONDS = 30
 AUCTION_HISTORY_LIMIT = 200
+PACKET_LIFETIME_BLOCKS = 30
 
 
 @dataclass(frozen=True)
@@ -40,12 +43,15 @@ class TransactionIndex:
 class ChainState:
     """可克隆的状态机：克隆用于试算，正式状态只在区块确认后替换。"""
 
-    def __init__(self, settings: ChainSettings):
+    def __init__(self, settings: ChainSettings, domain: str | None = None):
         self.settings = settings
+        self.domain = domain
         self.height = 0
         self.balances: dict[str, int] = {}
         self.mining_income: dict[str, int] = {}
+        self.mined_blocks: dict[str, int] = {}
         self.nfts: dict[str, dict[str, Any]] = {}
+        self.thumbnails: dict[str, bytes] = {}
         self.listings: dict[str, dict[str, Any]] = {}
         self.auctions: dict[str, dict[str, Any]] = {}
         self.auction_history: list[dict[str, Any]] = []
@@ -72,7 +78,9 @@ class ChainState:
         validate_coinbase(coinbase)
         clock = int(block["header"]["timestamp"])
         self.height = height
-        self._credit_payouts(coinbase["payouts"])
+        self.settle_due(height, clock)
+        if self.domain is None:
+            self._credit_payouts(coinbase["payouts"])
         self.seen_tx_ids.add(coinbase["tx_id"])
         index = {
             coinbase["tx_id"]: TransactionIndex(
@@ -83,6 +91,10 @@ class ChainState:
         }
         for tx in transactions[1:]:
             index[tx["tx_id"]] = self.apply_tx(tx, clock, height=height, prevalidated=prevalidated)
+        if self.domain is not None:
+            self._credit_payouts(coinbase["payouts"])
+        finder = coinbase["finder"]
+        self.mined_blocks[finder] = self.mined_blocks.get(finder, 0) + 1
         return index
 
     def apply_tx(
@@ -97,7 +109,7 @@ class ChainState:
         if tx_type == COINBASE:
             raise RuleError("coinbase 只能出现在区块首位")
         if not prevalidated:
-            validate_signed_tx(tx)
+            validate_signed_tx(tx, self.domain)
         if tx["tx_id"] in self.seen_tx_ids:
             raise RuleError("这笔交易已经上链，不能重复执行")
         if tx_type not in FEE_FREE_TX_TYPES:
@@ -120,17 +132,23 @@ class ChainState:
         )
 
     def _apply_nft_mint(self, tx: dict[str, Any], _clock: int, height: int) -> TransactionIndex:
-        if len(self.nfts_of(tx["sender"])) >= self.settings.max_nfts_per_player:
+        if self.domain is None and len(self.nfts_of(tx["sender"])) >= self.settings.max_nfts_per_player:
             raise RuleError(f"每人最多铸造 {self.settings.max_nfts_per_player} 件藏品")
+        thumbnail = jpeg_thumbnail(tx["thumbnail"]) if self.domain is not None else None
         self._spend(tx["sender"], tx["fee"])
-        self.nfts[tx["tx_id"]] = {
-            "token_id": tx["tx_id"],
+        image_id = sha256d_hex(thumbnail) if thumbnail is not None else None
+        if image_id is not None:
+            self.thumbnails.setdefault(image_id, thumbnail)
+        common = {
             "owner": tx["sender"],
             "name": tx["name"],
             "seed": tx["seed"],
             "created_at": tx["timestamp"],
             "mint_height": height,
         }
+        for index in range(tx.get("quantity", 1)):
+            token_id = hash_json([tx["tx_id"], index]) if self.domain else tx["tx_id"]
+            self.nfts[token_id] = {**common, "token_id": token_id, "thumbnail_id": image_id}
         return TransactionIndex(frozenset((tx["sender"],)), None, 0)
 
     def _apply_nft_list(self, tx: dict[str, Any], _clock: int, _height: int) -> TransactionIndex:
@@ -185,7 +203,8 @@ class ChainState:
             "token_id": nft["token_id"],
             "seller": tx["sender"],
             "reserve_price": int(tx["reserve_price"]),
-            "ends_at": clock + int(tx["duration"]),
+            "ends_at": clock + int(tx["duration"]) if self.domain is None else None,
+            "ends_height": _height + int(tx["duration"]) if self.domain is not None else None,
             "highest_bid": None,
             "highest_bidder": None,
             "bid_count": 0,
@@ -204,7 +223,7 @@ class ChainState:
 
     def _apply_nft_bid(self, tx: dict[str, Any], clock: int, _height: int) -> TransactionIndex:
         auction = self._require_auction(tx["auction_id"])
-        if clock >= auction["ends_at"]:
+        if (clock >= auction["ends_at"] if self.domain is None else _height >= auction["ends_height"]):
             raise RuleError("拍卖已经结束了")
         if tx["sender"] == auction["seller"]:
             raise RuleError("卖家不能给自己的藏品出价")
@@ -223,7 +242,7 @@ class ChainState:
         auction["highest_bid"] = amount
         auction["highest_bidder"] = tx["sender"]
         auction["bid_count"] = int(auction["bid_count"]) + 1
-        if clock >= auction["ends_at"] - SNIPE_EXTENSION_WINDOW:
+        if self.domain is None and clock >= auction["ends_at"] - SNIPE_EXTENSION_WINDOW:
             auction["ends_at"] = clock + SNIPE_EXTENSION_SECONDS
         return TransactionIndex(frozenset((tx["sender"],)), None, amount)
 
@@ -262,7 +281,8 @@ class ChainState:
             "count": tx["count"],
             "note": tx.get("note", ""),
             "created_at": tx["timestamp"],
-            "expires_at": tx["timestamp"] + self.settings.packet_expiry_seconds,
+            "expires_at": tx["timestamp"] + self.settings.packet_expiry_seconds if self.domain is None else None,
+            "expires_height": _height + PACKET_LIFETIME_BLOCKS if self.domain is not None else None,
             "remaining": tx["total"],
             "claims": {},
             "refunded": False,
@@ -273,13 +293,17 @@ class ChainState:
         packet = self.packets.get(tx["packet_id"])
         if not packet:
             raise RuleError("红包不存在")
-        if clock > packet["expires_at"]:
+        if (clock > packet["expires_at"] if self.domain is None else _height >= packet["expires_height"]):
             raise RuleError("红包已过期")
         index = tx["index"]
         if index >= packet["count"]:
             raise RuleError("领取序号超出红包个数")
         if index in packet["claims"]:
             raise RuleError("这个红包已经被领走了")
+        if self.domain is not None and any(
+            claim["receiver"] == tx["sender"] for claim in packet["claims"].values()
+        ):
+            raise RuleError("这个钱包已经领取过该红包")
         try:
             amount = amount_for_index(packet["packet_id"], packet["total"], packet["count"], index)
         except PacketError as exc:
@@ -317,6 +341,29 @@ class ChainState:
             amount = int(payout["amount"])
             self.balances[receiver] = self.balance_of(receiver) + amount
             self.mining_income[receiver] = self.mining_income.get(receiver, 0) + amount
+
+    def settle_due(self, height: int, clock: int) -> None:
+        if self.domain is None:
+            return
+        for packet in self.packets.values():
+            if packet["remaining"] and height >= packet["expires_height"]:
+                sender = packet["sender"]
+                self.balances[sender] = self.balance_of(sender) + packet["remaining"]
+                packet["remaining"] = 0
+                packet["refunded"] = True
+        for auction_id, auction in list(self.auctions.items()):
+            if height < auction["ends_height"]:
+                continue
+            winner = auction["highest_bidder"]
+            if winner is None:
+                self._record_auction(auction, "expired", clock)
+            else:
+                seller = auction["seller"]
+                amount = auction["highest_bid"]
+                self.balances[seller] = self.balance_of(seller) + amount
+                self.nfts[auction["token_id"]]["owner"] = winner
+                self._record_auction(auction, "sold", clock, winner=winner, amount=amount)
+            del self.auctions[auction_id]
 
     def _spend(self, address: str, amount: int) -> None:
         if amount < 0:

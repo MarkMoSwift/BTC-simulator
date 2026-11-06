@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>区块链科普模拟器 · 学生控制台</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=classroom-panels-4">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主内容</a>
@@ -40,12 +40,16 @@
       </div>
     </div>
     <div class="topbar-right">
+      <div class="topbar-wallet" id="topbar-wallet" hidden>
+        <label for="wallet-address">我的地址</label>
+        <input id="wallet-address" type="text" readonly spellcheck="false" aria-label="我的钱包地址">
+        <button type="button" class="icon-button" id="copy-address" title="复制钱包地址" aria-label="复制钱包地址">
+          <svg class="icon"><use href="#i-copy"/></svg>
+        </button>
+      </div>
       <span class="connection" id="connection"><i class="dot"></i><span id="connection-text">连接中</span></span>
       <span class="chip" id="identity" hidden>
         <strong id="me-nickname"></strong>
-        <button type="button" class="icon-button" id="copy-address" title="复制钱包地址">
-          <svg class="icon"><use href="#i-copy"/></svg>
-        </button>
       </span>
       <a class="icon-button" href="/bigscreen" target="_blank" title="打开投影大屏">
         <svg class="icon"><use href="#i-monitor"/></svg>
@@ -64,7 +68,7 @@
         <h2><svg class="icon"><use href="#i-zap"/></svg>挖矿</h2>
         <div class="panel-actions">
           <input type="file" id="miner-file" accept=".js,text/javascript" hidden>
-          <button type="button" class="ghost" id="load-miner">
+          <button type="button" class="ghost" id="load-miner" hidden>
             <svg class="icon"><use href="#i-upload"/></svg>自定义矿工
           </button>
           <button type="button" class="ghost" id="reset-miner" hidden>
@@ -78,35 +82,46 @@
       <div class="stats">
         <div class="stat"><span>实时算力</span><strong id="stat-hashrate">0 H/s</strong></div>
         <div class="stat"><span>本次工作量</span><strong id="stat-work">0</strong></div>
-        <div class="stat"><span>提交份额</span><strong id="stat-shares">0</strong></div>
-        <div class="stat"><span>份额难度</span><strong id="stat-share-bits">--</strong></div>
+        <div class="stat"><span>已验证样本</span><strong id="stat-shares">0</strong></div>
+        <div class="stat"><span>挖矿难度</span><strong id="stat-share-bits">--</strong></div>
         <div class="stat"><span>挖到区块</span><strong id="stat-blocks">0</strong></div>
-        <div class="stat"><span>矿工程序</span><strong id="stat-miner">默认矿工</strong></div>
       </div>
       <p class="job-line" id="job-line">正在获取挖矿作业…</p>
       <ul class="log" id="share-log"></ul>
     </section>
 
-    <section class="panel">
+    <section class="panel panel-wallet">
       <header class="panel-head"><h2><svg class="icon"><use href="#i-wallet"/></svg>钱包</h2></header>
       <div class="stats">
         <div class="stat"><span>余额</span><strong id="wallet-balance">0</strong></div>
         <div class="stat"><span>累计挖到</span><strong id="wallet-mined">0</strong></div>
       </div>
-      <p class="address-line">我的地址 <code id="wallet-address">--</code></p>
+      <form class="form" id="wallet-backup-form">
+        <label>钱包备份密码<input id="wallet-backup-password" type="password" minlength="8" autocomplete="new-password"></label>
+        <div class="row">
+          <button type="button" class="ghost" id="wallet-export">下载加密备份</button>
+          <button type="button" class="ghost" id="wallet-import">导入加密备份</button>
+          <input id="wallet-backup-file" type="file" accept=".json,application/json" hidden>
+        </div>
+      </form>
       <form class="form" id="transfer-form">
         <label>收款人（昵称或地址）<input id="transfer-receiver" required autocomplete="off" placeholder="例如 小明"></label>
         <div class="row">
           <label>金额<input id="transfer-amount" required inputmode="decimal" autocomplete="off" placeholder="1.5"></label>
-          <label>手续费<input id="transfer-fee" inputmode="decimal" autocomplete="off"></label>
+          <label>手续费<input id="transfer-fee" inputmode="decimal" autocomplete="off" value="0.1"></label>
         </div>
         <label>留言（可选，最多 40 字）<input id="transfer-note" maxlength="40" autocomplete="off"></label>
         <button type="submit" class="primary"><svg class="icon"><use href="#i-send"/></svg>转账</button>
       </form>
       <ul class="list" id="tx-list"></ul>
+      <form class="form" id="peer-form" hidden>
+        <label>连接独立节点<input id="peer-address" type="url" placeholder="http://192.168.1.23:8000" required></label>
+        <button type="submit" class="ghost">连接节点</button>
+        <p class="muted small">对方需要使用同一课堂邀请。</p>
+      </form>
     </section>
 
-    <section class="panel">
+    <section class="panel panel-economy">
       <header class="panel-head"><h2><svg class="icon"><use href="#i-gift"/></svg>链上红包</h2></header>
       <form class="form" id="packet-form">
         <div class="row">
@@ -116,21 +131,27 @@
         <label>留言<input id="packet-note" maxlength="40" autocomplete="off" placeholder="新年快乐"></label>
         <button type="submit" class="primary"><svg class="icon"><use href="#i-gift"/></svg>发红包</button>
       </form>
+      <label class="economy-fee">红包手续费（币）<input id="packet-fee" inputmode="decimal" value="0.1"></label>
       <ul class="list" id="packet-list"></ul>
     </section>
 
-    <section class="panel">
+    <section class="panel panel-economy">
       <header class="panel-head"><h2><svg class="icon"><use href="#i-image"/></svg>藏品市场</h2></header>
       <form class="form inline" id="mint-form">
         <label>藏品名字<input id="mint-name" required maxlength="16" autocomplete="off" placeholder="创世徽章"></label>
+        <label>照片<input id="mint-photo" type="file" accept="image/*"></label>
+        <img id="mint-preview" alt="照片预览" width="80" hidden>
+        <label>数量<input id="mint-quantity" type="number" min="1" max="20" value="1"></label>
         <button type="submit" class="primary"><svg class="icon"><use href="#i-plus"/></svg>铸造</button>
       </form>
+      <label class="economy-fee">藏品手续费（币）<input id="nft-fee" inputmode="decimal" value="0.1"></label>
       <ul class="list" id="nft-list"></ul>
       <h3 class="subhead"><svg class="icon"><use href="#i-gavel"/></svg>拍卖场</h3>
+      <label class="economy-fee">拍卖手续费（币）<input id="auction-fee" inputmode="decimal" value="0.1"></label>
       <ul class="list" id="auction-list"></ul>
     </section>
 
-    <section class="panel panel-wide">
+    <section class="panel panel-wide" id="leaderboard-panel">
       <header class="panel-head">
         <h2><svg class="icon"><use href="#i-trophy"/></svg>排行榜</h2>
         <div class="tabs" id="leaderboard-tabs">
@@ -152,6 +173,14 @@
       <header class="panel-head"><h2><svg class="icon"><use href="#i-box"/></svg>最近区块</h2></header>
       <ul class="list" id="block-list"></ul>
     </section>
+    <section class="panel" aria-labelledby="wallet-miners-title">
+      <header class="panel-head"><h2 id="wallet-miners-title"><svg class="icon"><use href="#i-zap"/></svg>矿工程序</h2></header>
+      <p class="muted small">为当前钱包工作的矿工</p>
+      <ul class="list miner-list" id="wallet-miner-list" aria-live="polite">
+        <li class="miner-item is-idle" id="browser-miner-row"><strong>默认浏览器 CPU 矿工</strong><span id="browser-miner-status">未工作</span></li>
+        <li class="miner-item is-idle" id="native-miner-row" hidden><strong id="native-miner-name">本机矿工</strong><span id="native-miner-status">未工作</span></li>
+      </ul>
+    </section>
   </main>
 
   <div class="toasts" id="toasts"></div>
@@ -160,15 +189,19 @@
     <form class="login-card" id="login-form">
       <h1>进入课堂</h1>
       <p class="muted">昵称会和这台设备上的钱包绑定，私钥只保存在浏览器里，服务器看不到它。</p>
-      <label>课堂昵称<input id="login-nickname" required maxlength="12" autocomplete="off" placeholder="1-12 个汉字、字母或数字"></label>
+      <label>你的昵称或者姓名<input id="login-nickname" required maxlength="12" autocomplete="off" placeholder="例如 小明"></label>
       <button type="submit" class="primary"><svg class="icon"><use href="#i-zap"/></svg>开始挖矿</button>
       <p class="error" id="login-error" hidden></p>
       <p class="muted small">本机钱包地址：<code id="login-address">--</code></p>
+      <label>导入已有钱包的备份密码<input id="login-backup-password" type="password" autocomplete="current-password"></label>
+      <button type="button" class="ghost" id="login-wallet-import">导入加密钱包备份</button>
+      <input id="login-wallet-file" type="file" accept=".json,application/json" hidden>
     </form>
   </div>
 
   <script src="/static/crypto.js"></script>
   <script src="/static/client.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/wallet-backup.js"></script>
+  <script src="/static/app.js?v=classroom-panels-4"></script>
 </body>
 </html>

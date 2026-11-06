@@ -21,7 +21,7 @@
   };
 
   const moveTimers = new WeakMap();
-  const feed = new Feed(handleEvent, handleConnection);
+  const feed = new Feed(handleEvent, handleConnection, "/ws/screen");
 
   function handleEvent(event) {
     const data = event.data || {};
@@ -31,6 +31,9 @@
     } else if (event.type === "block") {
       announceBlock(data);
       prependBlock(data);
+    } else if (event.type === "chain_changed") {
+      state.blocks = [];
+      if (data.reorganized) notify("主链已重组，榜单按当前主链更新", "info");
     } else if (event.type === "announcement") {
       renderAnnouncement({ message: data.message });
       if (data.message) {
@@ -55,6 +58,7 @@
       return;
     }
     state.chain = tick.chain;
+    state.blocks = tick.recent_blocks || [];
     state.names = Object.fromEntries(tick.leaderboard.rows.map((row) => [row.address, row.nickname]));
     $("metric-height").textContent = tick.chain.height.toLocaleString();
     $("metric-difficulty").textContent = `${tick.chain.difficulty} 位`;
@@ -63,7 +67,7 @@
     renderSubtitle();
     renderBoard($("board-hashrate"), tick.leaderboard.by_hashrate, "hashrate");
     renderBoard($("board-mined"), tick.leaderboard.by_mined, "mined");
-    $("hashrate-note").textContent = `${tick.leaderboard.rows.length} 位同学在场`;
+    $("hashrate-note").textContent = "算力与在线状态为本节点观测";
     renderPackets(tick.packets.active);
     renderMarket(tick.market);
     renderAuctions(tick.auctions.active);
@@ -200,7 +204,8 @@
         <strong>${escapeHtml(auction.name)}</strong>
         <span>${formatCoins(auctionPrice(auction), 2)} 币</span>
         <span class="strip-muted">${
-          auction.seconds_left > 0 ? `剩 ${formatCountdown(auction.seconds_left)}` : "等待结算"
+          auction.ends_height ? `第 ${auction.ends_height} 块结算` :
+            (auction.seconds_left > 0 ? `剩 ${formatCountdown(auction.seconds_left)}` : "等待结算")
         }</span>
       </li>`,
     );

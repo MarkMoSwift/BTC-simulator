@@ -1,4 +1,4 @@
-"""内存池：等待被打包的交易，以及打包前的试算工具。"""
+"""业务实现。"""
 from __future__ import annotations
 
 import time
@@ -15,8 +15,16 @@ TX_FUTURE_SECONDS = 300
 
 def project_state(base: ChainState, transactions: list[dict[str, Any]], clock: int) -> ChainState:
     projected = base.clone()
+    projected.settle_due(base.height + 1, clock)
     for tx in transactions:
-        projected.apply_tx(tx, clock)
+        trial = projected.clone()
+        try:
+            trial.apply_tx(tx, clock)
+        except (RuleError, TxError):
+            if base.domain is None:
+                raise
+        else:
+            projected = trial
     return projected
 
 
@@ -28,8 +36,9 @@ def select_for_block(
     max_bytes: int,
     clock: int,
 ) -> tuple[list[dict[str, Any]], ChainState]:
-    """按手续费高者优先试算，只有真的能执行成功的交易才会被打包。"""
+    """select_for_block。"""
     projected = base.clone()
+    projected.settle_due(base.height + 1, clock)
     selected: list[dict[str, Any]] = []
     used_bytes = 0
     for tx in candidates:
@@ -39,9 +48,11 @@ def select_for_block(
         if used_bytes + size > max_bytes:
             continue
         try:
-            projected.apply_tx(tx, clock)
+            trial = projected.clone()
+            trial.apply_tx(tx, clock)
         except (RuleError, TxError, ValueError):
             continue
+        projected = trial
         selected.append(tx)
         used_bytes += size
     return selected, projected
@@ -54,9 +65,11 @@ class Mempool:
         self.log = log or (lambda _message: None)
         self.transactions: dict[str, dict[str, Any]] = {}
         self.received_at: dict[str, int] = {}
-        self._load()
+        self.reload()
 
-    def _load(self) -> None:
+    def reload(self) -> None:
+        self.transactions.clear()
+        self.received_at.clear()
         for tx, received_at in self.store.list_mempool():
             self.transactions[tx["tx_id"]] = tx
             self.received_at[tx["tx_id"]] = int(received_at)
@@ -65,7 +78,8 @@ class Mempool:
 
     def add(self, tx: dict[str, Any], now: int | None = None) -> str:
         now = int(now if now is not None else time.time())
-        validate_signed_tx(tx)
+        base = self.state_provider()
+        validate_signed_tx(tx, base.domain)
         tx_id = tx["tx_id"]
         if tx_id in self.transactions:
             raise TxError("这笔交易已经在等待打包")
@@ -77,7 +91,7 @@ class Mempool:
         if timestamp > now + TX_FUTURE_SECONDS:
             raise TxError("交易时间超前，请检查设备时间")
 
-        project_state(self.state_provider(), self.ordered(), now).apply_tx(tx, now)
+        project_state(base, self.ordered(), now).apply_tx(tx, now, prevalidated=True)
 
         self.transactions[tx_id] = tx
         self.received_at[tx_id] = now
@@ -100,7 +114,7 @@ class Mempool:
         self.store.clear_mempool()
 
     def ordered(self) -> list[dict[str, Any]]:
-        """手续费高、提交早的交易排在前面。"""
+        """ordered。"""
         return sorted(
             self.transactions.values(),
             key=lambda tx: (-int(tx["fee"]), self.received_at.get(tx["tx_id"], 0)),

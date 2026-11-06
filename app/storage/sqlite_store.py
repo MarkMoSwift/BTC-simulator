@@ -31,8 +31,15 @@ class SQLiteStore:
         block: dict[str, Any],
         index: dict[str, TransactionIndex],
     ) -> None:
-        header = block["header"]
         with self.lock, self.connection:
+            self._insert_block(height, block_hash, block, index)
+
+    def _insert_block(
+        self, height: int, block_hash: str, block: dict[str, Any],
+        index: dict[str, TransactionIndex],
+    ) -> None:
+        header = block["header"]
+        with self.lock:
             self.connection.execute(
                 """
                 INSERT INTO blocks (height, hash, prev_hash, merkle_root, timestamp,
@@ -80,8 +87,33 @@ class SQLiteStore:
                     [(tx["tx_id"], address) for address in sorted(record.addresses)],
                 )
 
+    def replace_branch(self, fork_height: int, records: list, pending: list) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "DELETE FROM transaction_participants WHERE tx_id IN "
+                "(SELECT tx_id FROM transactions WHERE block_height > ?)", (fork_height,),
+            )
+            self.connection.execute("DELETE FROM transactions WHERE block_height > ?", (fork_height,))
+            self.connection.execute("DELETE FROM blocks WHERE height > ?", (fork_height,))
+            for height, block_hash, block, index in records:
+                self._insert_block(height, block_hash, block, index)
+            self.connection.execute("DELETE FROM mempool")
+            self.connection.executemany(
+                "INSERT INTO mempool (tx_id, fee, received_at, tx_json) VALUES (?, ?, ?, ?)",
+                [(tx["tx_id"], tx["fee"], received, json.dumps(tx)) for tx, received in pending],
+            )
+
     def reset_chain(self) -> None:
         with self.lock, self.connection:
+            self._reset_chain()
+
+    def reset_session(self) -> None:
+        with self.lock, self.connection:
+            self._reset_chain()
+            self.connection.execute("DELETE FROM players")
+
+    def _reset_chain(self) -> None:
+        with self.lock:
             self.connection.execute("DELETE FROM blocks")
             self.connection.execute("DELETE FROM transactions")
             self.connection.execute("DELETE FROM transaction_participants")
@@ -126,7 +158,8 @@ class SQLiteStore:
         with self.lock:
             rows = self.connection.execute(
                 """
-                SELECT height, hash, prev_hash, timestamp, difficulty, tx_count, nonce, miner_tag
+                SELECT height, hash, prev_hash, timestamp, difficulty, tx_count, nonce, miner_tag,
+                       json_extract(block_json, '$.transactions[0].finder') AS finder
                 FROM blocks ORDER BY height DESC LIMIT ? OFFSET ?
                 """,
                 (int(limit), int(offset)),
@@ -137,6 +170,14 @@ class SQLiteStore:
         with self.lock:
             rows = self.connection.execute(
                 "SELECT block_json FROM blocks ORDER BY height ASC"
+            ).fetchall()
+        return [json.loads(row["block_json"]) for row in rows]
+
+    def blocks_after(self, height: int, limit: int) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT block_json FROM blocks WHERE height > ? ORDER BY height LIMIT ?",
+                (height, limit),
             ).fetchall()
         return [json.loads(row["block_json"]) for row in rows]
 

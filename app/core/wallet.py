@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
+from pathlib import Path
 
 from ecdsa import BadSignatureError, NIST256p, SigningKey, VerifyingKey
 from ecdsa.util import sigdecode_string, sigencode_string
@@ -57,7 +59,25 @@ def sign_message(private_key_hex: str, message: bytes) -> str:
 
 
 def generate_private_key() -> str:
-    return secrets.token_bytes(32).hex()
+    return f"{secrets.randbelow(NIST256p.order - 1) + 1:064x}"
+
+
+class LocalWallet:
+    def __init__(self, path: Path, import_path: Path | None = None):
+        if import_path is not None or not path.exists():
+            private = (import_path.read_text(encoding="utf-8-sig").strip()
+                       if import_path else generate_private_key())
+            public_key_from_private(private)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600),
+                           "w", encoding="ascii") as output:
+                output.write(private + "\n")
+        self._private = path.read_text(encoding="ascii").strip()
+        self.public_key = public_key_from_private(self._private)
+        self.address = address_from_public_key(self.public_key)
+
+    def sign(self, message: bytes) -> str:
+        return sign_message(self._private, message)
 
 
 def _private_bytes(private_key_hex: str) -> bytes:

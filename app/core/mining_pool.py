@@ -1,9 +1,4 @@
-"""矿池：下发挖矿作业、校验份额、按上一阶段的工作量分配区块奖励。
-
-区块头必须在挖矿开始前就锁定梅克尔根，所以 coinbase 的分配名单不可能等到"谁挖到
-这个块"的时候再决定。这里的做法是：每份作业携带一份已经封盘的工作量快照，矿工拿到
-的区块头里已经包含按这份快照分钱的 coinbase；发现区块的人再额外拿一份发现者奖励。
-"""
+"""业务实现。"""
 from __future__ import annotations
 
 import hashlib
@@ -17,6 +12,7 @@ from typing import Any, Callable
 from app.config import PoolSettings
 from app.core.block import block_hash, meets_bits, merkle_root, target_for_bits
 from app.core.chain import Blockchain
+from app.core.consensus import PROTOCOL_MAJOR
 from app.core.mempool import Mempool, select_for_block
 from app.core.transaction import compute_tx_id
 
@@ -27,7 +23,7 @@ RATE_WINDOW_SECONDS = 30
 
 @dataclass
 class Job:
-    """一份挖矿作业：交易列表与分配名单都固定下来，谁挖到都不会改变。"""
+    """Job。"""
 
     job_id: str
     height: int
@@ -39,6 +35,7 @@ class Job:
     window: dict[str, int]
     finder_bonus_percent: int
     created_at: float
+    version: int = 1
 
     @property
     def fees(self) -> int:
@@ -52,7 +49,8 @@ class Job:
             "subsidy": self.subsidy,
             "fees": self.fees,
             "finder": finder,
-            "payouts": split_reward(
+            "payouts": [{"receiver": finder, "amount": self.subsidy + self.fees}]
+            if self.version == PROTOCOL_MAJOR else split_reward(
                 self.window,
                 self.subsidy + self.fees,
                 finder=finder,
@@ -70,7 +68,7 @@ class Job:
 
     def header(self, miner_tag: int, finder: str, nonce: int) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": self.version,
             "prev_hash": self.prev_hash,
             "merkle_root": self.merkle_root_for(finder),
             "timestamp": self.timestamp,
@@ -83,9 +81,9 @@ class Job:
 @dataclass
 class PlayerMining:
     address: str
-    # 下一份作业要下发的份额难度，由 _next_share_bits 按实测算力算出。
+
     share_bits: int
-    # 最近下发给这个矿工的份额难度：对外显示，并作为 _next_share_bits 的调整基准。
+
     issued_share_bits: int
     work: int = 0
     shares: int = 0
@@ -93,19 +91,14 @@ class PlayerMining:
     blocks_found: int = 0
     last_share_at: float = 0.0
     samples: deque[tuple[float, int]] = field(default_factory=deque)
-    # 当前这段连续挖矿从哪一刻开始，算力读数拿它当分母的起点。
+
     window_started_at: float = 0.0
     unflushed_work: int = 0
     unflushed_shares: int = 0
     unflushed_blocks: int = 0
 
     def record_share(self, now: float, work: int, target_seconds: float) -> float:
-        """收下一份验证通过的份额，返回折算出的算力。
-
-        和上一份份额隔了一个窗口以上，说明中间停过，这段空档不能算进分母，于是重新开
-        一段。新一段的第一份份额前面算了多久无从得知，只有份额难度被控制到的目标间隔
-        是已知的，就拿它当起点，等后面的份额把这个估计修正过来。
-        """
+        """record_share。"""
         if now - self.last_share_at > RATE_WINDOW_SECONDS:
             self.window_started_at = now - target_seconds
         self.last_share_at = now
@@ -113,11 +106,7 @@ class PlayerMining:
         return self.hashrate(now)
 
     def hashrate(self, now: float) -> float:
-        """最近一个窗口里验证通过的工作量，除以这段挖矿已经过去的时间。
-
-        分母是这段连续挖矿的时长，而不是窗口里第一份份额到现在的间隔：份额交得稀的
-        时候，两份份额可能只隔几秒，按那几秒折算会让安静的矿工在排行榜上读数翻几倍。
-        """
+        """hashrate。"""
         cutoff = now - RATE_WINDOW_SECONDS
         while self.samples and self.samples[0][0] < cutoff:
             self.samples.popleft()
@@ -130,10 +119,7 @@ class PlayerMining:
 
 @dataclass
 class RateGate:
-    """令牌桶：每秒放行 `rate` 份提交，允许同样大小的突发。
-
-    洪水量超过上限时只挡掉多出来的部分，客户端始终能按比例拿到放行额度。
-    """
+    """RateGate。"""
 
     rate: float
     tokens: float
@@ -171,6 +157,7 @@ class MiningPool:
         self.window: dict[str, int] = {}
         self.stage: dict[str, int] = {}
         self.job: Job | None = None
+        self.previous_job: Job | None = None
         self.seen_shares: set[str] = set()
         self.gates: dict[str, RateGate] = {}
 
@@ -186,14 +173,22 @@ class MiningPool:
         return self._job_payload(job, address)
 
     def tick(self, now: float | None = None) -> dict[str, Any]:
-        """作业老化处理：内存池有新交易就重发作业，长时间不出块就临时降一位难度。"""
+        """tick。"""
         now = now if now is not None else time.time()
         job = self._ensure_job(int(now))
         changes: dict[str, Any] = {"refreshed": False, "difficulty_relaxed": False}
         age = now - job.created_at
-        if age > self.settings.job_refresh_seconds and self._has_new_transactions(job):
+        if age > self.settings.job_refresh_seconds and (
+            self.chain.session is not None or self._has_new_transactions(job)
+        ):
             self._refresh_job(int(now))
             changes["refreshed"] = True
+            return changes
+        if self.chain.session is not None:
+            difficulty = min(self.chain.allowed_difficulties(job.height, int(now)))
+            if difficulty != job.difficulty:
+                self._refresh_job(int(now))
+                changes.update(refreshed=True, difficulty_relaxed=True)
             return changes
         if age > self.chain.settings.stall_seconds and self.chain.settings.difficulty_override is None:
             relaxed = max(job.difficulty - 1, self.chain.settings.difficulty_min)
@@ -212,17 +207,19 @@ class MiningPool:
         share_bits: int,
         now: float | None = None,
     ) -> dict[str, Any]:
-        """验算一份份额，并按矿工报上来的难度记账。
-
-        难度由矿工带上，是因为服务端只知道自己下发过哪些难度，不知道同学手上那份作业是
-        哪一版：调过难度以后还在按旧目标搜索的份额，就该按旧难度验证和记账，否则这一段
-        的算力会凭空多出或者少掉一截。
-        """
+        """submit_share。"""
         now = now if now is not None else time.time()
         if isinstance(nonce, bool) or not isinstance(nonce, int) or not 0 <= nonce <= 0xFFFFFFFF:
             return self._reject("nonce 必须是 0 到 2^32-1 之间的整数")
         job = self.job
         if job is None or job.job_id != job_id:
+            previous = self.previous_job
+            if (not self.chain.session or job is None or previous is None
+                    or previous.job_id != job_id or now > job.created_at + 6
+                    or self._job_is_stale(previous)):
+                return self._reject("作业已经更新，请重新获取")
+            job = previous
+        if self.chain.session and self._job_is_stale(job):
             return self._reject("作业已经更新，请重新获取")
         if not self._allow_submission(address, now):
             return self._reject("提交过于频繁")
@@ -230,12 +227,15 @@ class MiningPool:
             return self._reject("share_bits 必须是整数")
 
         player = self._ensure_player(address)
-        bits = self._clamp_share_bits(share_bits, job.difficulty)
+        bits = player.issued_share_bits if self.chain.session else self._clamp_share_bits(share_bits, job.difficulty)
         key = f"{job_id}:{address}:{nonce}"
         if key in self.seen_shares:
             return self._reject("这个 nonce 已经提交过")
 
         digest = block_hash(job.header(self.miner_tag(address), address, nonce))
+        full_block = meets_bits(digest, job.difficulty)
+        if self.chain.session and share_bits != bits and not full_block:
+            return self._reject("工作量样本目标已更新")
         if not meets_bits(digest, bits):
             return self._reject("哈希没有达到份额难度")
 
@@ -261,7 +261,7 @@ class MiningPool:
             "block": None,
             "balance": self.chain.state.balance_of(address),
         }
-        if meets_bits(digest, job.difficulty):
+        if full_block:
             result.update(self._close_block(address, job, nonce, now))
         return result
 
@@ -327,6 +327,7 @@ class MiningPool:
         self.window.clear()
         self.stage.clear()
         self.job = None
+        self.previous_job = None
         self.seen_shares.clear()
         self.gates.clear()
 
@@ -341,7 +342,7 @@ class MiningPool:
         return self.job
 
     def _job_is_stale(self, job: Job) -> bool:
-        """教师改过共识参数后旧作业会挖出无效区块，必须立刻换成新作业。"""
+        """_job_is_stale。"""
         if job.height != self.chain.height + 1 or job.prev_hash != self.chain.tip_hash:
             return True
         settings = self.chain.settings
@@ -353,13 +354,20 @@ class MiningPool:
 
     def _refresh_job(self, now: int, difficulty: int | None = None) -> Job:
         height = self.chain.height + 1
+        if self.chain.session is not None:
+            now = max(now, self.chain.tip_header["timestamp"])
+            difficulty = min(self.chain.allowed_difficulties(height, now))
         limit = max(self.chain.settings.max_block_transactions - 1, 0)
         selected, _ = select_for_block(
             self.chain.state,
             self.mempool.ordered(),
             limit=limit,
-            max_bytes=self.chain.settings.block_max_bytes // 2,
+            max_bytes=(self.chain.settings.block_max_bytes - 1024 - limit
+                       if self.chain.session else self.chain.settings.block_max_bytes // 2),
             clock=now,
+        )
+        self.previous_job = (
+            self.job if self.chain.session and self.job and not self._job_is_stale(self.job) else None
         )
         self.job = Job(
             job_id=secrets.token_hex(8),
@@ -372,8 +380,13 @@ class MiningPool:
             window=dict(self.window),
             finder_bonus_percent=self.chain.settings.finder_bonus_percent,
             created_at=float(now),
+            version=PROTOCOL_MAJOR if self.chain.session else 1,
         )
-        self.seen_shares.clear()
+        if self.previous_job:
+            prefix = self.previous_job.job_id + ":"
+            self.seen_shares = {key for key in self.seen_shares if key.startswith(prefix)}
+        else:
+            self.seen_shares.clear()
         return self.job
 
     def _has_new_transactions(self, job: Job) -> bool:
@@ -389,7 +402,7 @@ class MiningPool:
         return {
             "job_id": job.job_id,
             "height": job.height,
-            "version": 1,
+            "version": job.version,
             "prev_hash": job.prev_hash,
             "merkle_root": merkle_root(tx_ids),
             "tx_ids": tx_ids,
@@ -461,16 +474,14 @@ class MiningPool:
         return player
 
     def _clamp_share_bits(self, bits: int, job_difficulty: int) -> int:
+        if self.chain.session:
+            minimum = min(self.settings.share_bits_min, job_difficulty)
+            return min(max(bits, minimum), self.settings.share_bits_max, job_difficulty)
         upper = min(self.settings.share_bits_max, max(job_difficulty, self.settings.share_bits_min))
         return min(max(int(bits), self.settings.share_bits_min), upper)
 
     def _next_share_bits(self, current_bits: int, rate: float, job_difficulty: int) -> int:
-        """按实测算力定份额难度，目标是每个同学大约每 share_target_seconds 交一份份额。
-
-        难度每差一位，预期份额间隔就差一倍。现有难度带来的间隔落在目标的一半到两倍
-        之间就保持不变，这样读数的小幅波动不会让难度在两档之间来回跳；真偏离了目标，
-        就按当前算力一次算准，而不是一位一位地试。
-        """
+        """_next_share_bits。"""
         target_seconds = float(self.settings.share_target_seconds)
         expected_seconds = (1 << max(int(current_bits), 0)) / max(rate, 1.0)
         if target_seconds / 2 <= expected_seconds <= target_seconds * 2:
@@ -491,7 +502,7 @@ class MiningPool:
 
 
 def actual_bits(digest: str) -> int:
-    """哈希实际达到的难度位数，用来记录"最高份额"。"""
+    """actual_bits。"""
     value = int(digest, 16)
     return 256 - value.bit_length() if value else 256
 
@@ -503,7 +514,7 @@ def split_reward(
     finder: str,
     bonus_percent: int,
 ) -> list[dict[str, Any]]:
-    """按工作量比例分配奖励：发现者额外拿一份，其余按份额分配，余数按小数部分补足。"""
+    """split_reward。"""
     shares = {address: int(work) for address, work in window.items() if int(work) > 0}
     shares.setdefault(finder, 1)
     total_work = sum(shares.values())

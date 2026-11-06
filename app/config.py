@@ -1,15 +1,33 @@
-"""课堂配置：一个 JSON 文件描述网络参数，教师可在教师页修改。"""
+"""本地节点配置、场次信息与证书路径。"""
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import secrets
-from dataclasses import asdict, dataclass, field
+import ssl
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.units import SAT_PER_COIN
+from app.core.consensus import Session
 
-VERSION = "2.0.0"
+VERSION = "3.0.0"
+SESSION_VERSION = VERSION
+
+
+def resolve_config_path(path: str | Path | None = None) -> Path:
+    """使用显式路径、环境变量或工作目录中的配置。"""
+    if path is not None:
+        return Path(path).expanduser().resolve()
+    configured = os.environ.get("BTC_SIM_CONFIG", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    default = Path("config.json")
+    legacy = Path("config.local.json")
+    return (legacy if not default.exists() and legacy.exists() else default).resolve()
 
 
 class ConfigError(Exception):
@@ -64,12 +82,31 @@ class PoolSettings:
 @dataclass(frozen=True)
 class Settings:
     classroom_name: str = "区块链科普课堂"
+    node_name: str = ""
+    peers: list[str] = field(default_factory=list)
     web_host: str = "0.0.0.0"
     web_port: int = 8000
     storage_path: str = "./data/classroom.db"
     admin_key: str = ""
+    network_id: str = "btc-sim-v3"
+    session_id: str = ""
+    session_start_time: int | None = None
+    reset_chain_on_start: bool = True
+    tls_certificate_dir: str = ""
     chain: ChainSettings = field(default_factory=ChainSettings)
     pool: PoolSettings = field(default_factory=PoolSettings)
+
+    def session(self) -> Session | None:
+        if not isinstance(self.network_id, str) or not self.network_id or self.network_id != self.network_id.strip() or len(self.network_id) > 128:
+            raise ConfigError("network_id 必须为 1 至 128 个字符，且首尾不能有空白")
+        if not isinstance(self.session_id, str):
+            raise ConfigError("session_id 必须是字符串")
+        if not self.session_id and self.session_start_time is None:
+            return None
+        try:
+            return Session(self.network_id, self.session_id, self.session_start_time)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
 
 
 def _int_field(raw: dict[str, Any], key: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -151,55 +188,89 @@ def settings_from_raw(raw: dict[str, Any]) -> Settings:
     port = _int_field(raw, "web_port", 8000, minimum=1, maximum=65_535)
     storage_path = str(raw.get("storage_path", "./data/classroom.db")).strip() or "./data/classroom.db"
     admin_key = str(raw.get("admin_key", "")).strip()
-    return Settings(
+    node_name = raw.get("node_name", "")
+    if node_name is None:
+        node_name = ""
+    if not isinstance(node_name, str) or len(node_name.strip()) > 64:
+        raise ConfigError("node_name 必须是不超过 64 个字符的字符串")
+    peers = raw.get("peers", [])
+    if not isinstance(peers, list) or not all(isinstance(peer, str) for peer in peers):
+        raise ConfigError("peers 必须是节点地址字符串列表")
+    normalized_peers = []
+    for peer in peers:
+        peer = peer.strip().rstrip("/")
+        if "://" not in peer:
+            try:
+                ip = ipaddress.ip_address(peer)
+            except ValueError as exc:
+                raise ConfigError("节点地址须为 IP 或 HTTP/HTTPS URL") from exc
+            host_literal = f"[{ip}]" if ip.version == 6 else str(ip)
+            peer = f"http://{host_literal}:8000"
+        try:
+            parsed = urlsplit(peer)
+            port_number = parsed.port
+        except ValueError as exc:
+            raise ConfigError("peers 中的节点地址不合法") from exc
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.path not in {"", "/"}
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or (port_number is not None and port_number < 1)):
+            raise ConfigError("peers 中的节点地址必须是无凭据的 HTTP/HTTPS 地址")
+        if peer not in normalized_peers:
+            normalized_peers.append(peer)
+    tls = raw.get("tls", {})
+    if not isinstance(tls, dict) or not isinstance(tls.get("certificate_dir", ""), str):
+        raise ConfigError("tls.certificate_dir 必须是字符串")
+    reset = raw.get("reset_chain_on_start", True)
+    if type(reset) is not bool:
+        raise ConfigError("reset_chain_on_start 必须是布尔值")
+    settings = Settings(
         classroom_name=name,
+        node_name=node_name.strip(),
+        peers=normalized_peers,
         web_host=host,
         web_port=port,
         storage_path=storage_path,
-        admin_key=admin_key,
-        chain=_chain_from_raw(raw.get("chain", {})),
+        admin_key="" if raw.get("session_id") else admin_key,
+        network_id=raw.get("network_id", "btc-sim-v3"),
+        session_id=raw.get("session_id", ""),
+        session_start_time=raw.get("session_start_time"),
+        reset_chain_on_start=reset,
+        tls_certificate_dir=tls.get("certificate_dir", "").strip(),
+        chain=ChainSettings() if raw.get("session_id") else _chain_from_raw(raw.get("chain", {})),
         pool=_pool_from_raw(raw.get("pool", {})),
     )
+    settings.session()
+    return settings
 
 
 def settings_to_raw(settings: Settings) -> dict[str, Any]:
-    return {"version": VERSION, **asdict(settings)}
-
-
-def generate_admin_key() -> str:
-    return secrets.token_hex(3).upper()
+    raw = asdict(settings)
+    raw["tls"] = {"certificate_dir": raw.pop("tls_certificate_dir")}
+    if settings.session() or not settings.admin_key:
+        raw.pop("admin_key")
+    if settings.session() or settings.chain == ChainSettings():
+        raw.pop("chain")
+    if settings.pool == PoolSettings():
+        raw.pop("pool")
+    return {"version": SESSION_VERSION if settings.session() else VERSION, **raw}
 
 
 def load_settings(path: str | Path) -> Settings:
-    """读取配置；首次运行会生成配置文件，并写入一个随机教师口令。"""
+    """读取本地配置并在需要时保存自动生成的节点名称。"""
     config_path = Path(path)
     if not config_path.exists():
-        settings = Settings(
-            admin_key=generate_admin_key(),
-            **{
-                key: value
-                for key, value in asdict(Settings()).items()
-                if key not in {"admin_key", "chain", "pool"}
-            },
-        )
+        settings = Settings(node_name="node-" + secrets.token_hex(4))
         save_settings(settings, config_path)
         return settings
 
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise ConfigError(f"配置文件不是合法 JSON：{exc}") from exc
     settings = settings_from_raw(raw)
-    if not settings.admin_key:
-        settings = Settings(
-            classroom_name=settings.classroom_name,
-            web_host=settings.web_host,
-            web_port=settings.web_port,
-            storage_path=settings.storage_path,
-            admin_key=generate_admin_key(),
-            chain=settings.chain,
-            pool=settings.pool,
-        )
+    if not settings.node_name or (settings.session() and ("admin_key" in raw or "chain" in raw)):
+        settings = replace(settings, node_name=settings.node_name or "node-" + secrets.token_hex(4))
         save_settings(settings, config_path)
     return settings
 
@@ -216,3 +287,20 @@ def resolve_storage_path(settings: Settings, config_path: str | Path) -> Path:
     if storage.is_absolute():
         return storage
     return (Path(config_path).resolve().parent / storage).resolve()
+
+
+def resolve_session_storage(settings: Settings, config_path: str | Path, session: Session) -> Path:
+    storage = resolve_storage_path(settings, config_path)
+    return storage.parent / "v3" / storage.name / f"{session.genesis_hash}.db"
+
+
+def tls_options(settings: Settings, config_path: str | Path) -> dict[str, str]:
+    if not settings.tls_certificate_dir:
+        return {}
+    directory = Path(config_path).resolve().parent / settings.tls_certificate_dir
+    certificate, key = directory / "cert.pem", directory / "key.pem"
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(certificate, key)
+    except (OSError, ValueError) as exc:
+        raise ConfigError("无法加载 TLS 目录中的 cert.pem 和 key.pem") from exc
+    return {"ssl_certfile": str(certificate), "ssl_keyfile": str(key)}

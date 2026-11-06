@@ -1,0 +1,14 @@
+{
+  "version": "3.0.0",
+  "classroom_name": "区块链科普课堂",
+  "node_name": "",
+  "peers": [],
+  "web_host": "0.0.0.0",
+  "web_port": 8000,
+  "storage_path": "./data/classroom.db",
+  "network_id": "btc-sim-v3",
+  "session_id": "",
+  "session_start_time": null,
+  "reset_chain_on_start": true,
+  "tls": {"certificate_dir": ""}
+}

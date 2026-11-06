@@ -186,11 +186,36 @@ code,
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 12px 24px;
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
+}
+
+.topbar-wallet:not([hidden]) {
+  display: inline-flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.85rem;
+}
+
+.topbar-wallet label {
+  flex: none;
+  white-space: nowrap;
+}
+
+.topbar-wallet button {
+  flex: none;
+}
+
+.topbar-wallet input {
+  min-width: 0;
+  width: min(48ch, 34vw);
+  font-family: monospace;
 }
 
 .brand {
@@ -338,6 +363,11 @@ code,
   padding: 20px;
   background: var(--surface);
   border-radius: var(--radius);
+}
+
+.panel-mining,
+.panel-wallet {
+  align-self: stretch;
 }
 
 .panel-mining {
@@ -1001,6 +1031,48 @@ a.ghost {
 
 /* ---------- 响应式 ---------- */
 
+.panel-economy {
+  align-self: start;
+  max-height: 36rem;
+  overflow-y: auto;
+}
+
+.economy-fee {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block: 10px;
+}
+
+.economy-fee input {
+  width: 7rem;
+  min-width: 0;
+}
+
+.miner-list {
+  display: flex;
+  flex-flow: row wrap;
+  gap: 10px;
+}
+
+.miner-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+
+.miner-config-form {
+  margin-top: 14px;
+}
+.miner-item.is-working { background: var(--success-soft); border-color: var(--success); }
+.miner-item.is-working span { color: var(--success); }
+.miner-item.is-idle { background: var(--surface-2); color: var(--ink-soft); }
+.miner-item.is-failed { background: var(--danger-soft); border-color: var(--danger); }
+
 @media (min-width: 900px) {
   .layout {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1028,6 +1100,11 @@ a.ghost {
 @media (max-width: 640px) {
   .topbar {
     padding: 10px 14px;
+  }
+
+  .topbar-right {
+    flex-basis: 100%;
+    flex-wrap: wrap;
   }
 
   .layout {
