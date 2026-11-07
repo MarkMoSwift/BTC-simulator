@@ -306,6 +306,20 @@ code,
   font-weight: 500;
 }
 
+#identity { padding: 3px; }
+#me-nickname {
+  display: block;
+  width: 12ch;
+  max-width: 24vw;
+  min-width: 0;
+  padding-inline: 8px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#copy-node-name { flex: none; }
+
 .chip .icon-button {
   width: 30px;
   height: 30px;
@@ -1229,6 +1243,12 @@ a.ghost {
 }
 
 .node-companion { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.peer-connect-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.peer-connect-row input { flex: 1; min-width: 0; width: 0; }
+.peer-connect-row button, .peer-actions button { flex-shrink: 0; white-space: nowrap; }
+.configured-peers { max-height: 18rem; flex-shrink: 0; }
+.configured-peer .grow { min-width: 0; overflow-wrap: anywhere; }
+.peer-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .panel-mining .stats { grid-template-columns: repeat(5,minmax(0,1fr)); }
 .panel-mining .stats.stats-wide { grid-template-columns: repeat(2,minmax(0,1.4fr)) repeat(3,minmax(0,.8fr)); }
 .panel-mining .stat { min-width: 0; padding-inline: 6px; }

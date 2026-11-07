@@ -148,6 +148,7 @@
     $("topbar-wallet").hidden = false;
     $("logout").hidden = false;
     $("me-nickname").textContent = state.nickname;
+    $("me-nickname").title = state.nickname;
     state.me = player;
     renderWallet();
     feed.connect(state.token);
@@ -186,7 +187,7 @@
       refreshMe();
       pollJob();
       if (data.reorganized) {
-        pushLog("主链发生重组，余额、藏品和待确认交易已重新计算", "info");
+        pushLog("主链发生重组，余额、藏品和待确认交易已重新计算", "reorg");
         notify("主链已重组，请查看更新后的余额和交易确认", "info");
       }
     } else if (event.type === "mining_job_changed") {
@@ -847,11 +848,12 @@
     const rows = state.me.transactions.map((tx) => {
       const outgoing = tx.sender === state.me.address;
       const kind = tx.type === "transfer" ? (outgoing ? "转出" : "转入") : labelOfType(tx.type);
-      const text = tx.amount ? `${kind} ${formatCoins(tx.amount)} 币` : kind;
+      const text = tx.type === "coinbase" ? `${formatCoins(tx.amount || 0)} 币`
+        : tx.amount ? `${kind} ${formatCoins(tx.amount)} 币` : kind;
       return `<li class="row-item">
         <span class="tag">${escapeHtml(labelOfType(tx.type))}</span>
         <span class="grow">${escapeHtml(text)}</span>
-        <span class="muted small">区块 #${tx.block_height} · ${tx.confirmations} 次确认 · ${formatTime(tx.timestamp)}</span>
+        <span class="muted small">区块 #${tx.block_height} · <span title="确认数 = 当前主链高度 − 所在区块高度 + 1；与节点数量无关">${tx.confirmations} 次确认</span> · ${formatTime(tx.timestamp)}</span>
       </li>`;
     });
     $("tx-list").innerHTML = rows.join("") || `<li class="empty">还没有链上交易</li>`;
@@ -1138,6 +1140,11 @@
           <span class="mono" title="${escapeHtml(row.address)}">${escapeHtml(shortAddress(row.address))}</span>
           <span class="muted small">网页与 JS 来源：${escapeHtml((row.source_origins?.length ? row.source_origins : [row.address === ownBrowser ? location.origin : "当前节点（访问地址未上报）"]).join("、"))}</span></li>`).join("");
     if (!nodes) return;
+    const peerStates = {connecting: "正在连接", connected: "已连接", retrying: "等待重试", paused: "已断开 · 不再重试"};
+    $("configured-peers").innerHTML = (nodes.peers || []).map(peer =>
+      `<li class="row-item configured-peer"><div class="grow">${peer.name ? `<strong>${escapeHtml(peer.name)}</strong>` : ""}<strong class="mono">${escapeHtml(peer.address)}</strong><span class="muted small">${peer.direction === "inbound" ? "被动接入" : "主动连接"} · ${peerStates[peer.status] || "未连接"}${peer.direction === "inbound" ? "（来源地址）" : ""}</span></div>
+       ${state.localWallet && peer.direction !== "inbound" ? `<div class="peer-actions"><button type="button" class="ghost" data-peer-action="${peer.status === "paused" ? "connect" : "disconnect"}" data-address="${escapeHtml(peer.address)}">${peer.status === "paused" ? "连接" : "断开"}</button><button type="button" class="ghost" data-peer-action="delete" data-address="${escapeHtml(peer.address)}">删除</button></div>` : ""}</li>`
+    ).join("") || '<li class="empty">尚未添加独立节点</li>';
     $("node-log").innerHTML = [...nodes.events].reverse().map(item =>
       `<li><time class="muted small">${formatTime(item.at)}</time><span>${escapeHtml(item.message)}</span></li>`).join("") || '<li>暂时没有节点连接记录</li>';
   }
@@ -1168,7 +1175,7 @@
   }
 
   function pushLog(message, kind) {
-    const category = kind === "error" ? "提示" : kind === "block" || message.startsWith("区块") ? "出块"
+    const category = kind === "reorg" ? "重组" : kind === "error" ? "提示" : kind === "block" || message.startsWith("区块") ? "出块"
       : message.includes("交易") ? "交易" : message.includes("作业") ? "作业" : "算力";
     state.log.unshift({ message, category, kind: kind || "info", at: new Date() });
     state.log = state.log.slice(0, LOG_LIMIT);
@@ -1267,6 +1274,20 @@
         notify(problem.message, "error");
       }
     });
+    $("configured-peers").addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-peer-action]");
+      if (!button || button.disabled) return;
+      button.disabled = true;
+      const action = button.dataset.peerAction;
+      try {
+        await localPost(action === "connect" ? "/api/local/peers" : `/api/local/peers/${action}`, {address: button.dataset.address});
+        notify(action === "delete" ? "已删除节点" : action === "disconnect" ? "已断开，停止自动重试；地址已保留" : "正在尝试连接", "info");
+      } catch (problem) {
+        notify(problem.message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
     $("login-wallet-import").addEventListener("click", () => $("login-wallet-file").click());
     $("login-wallet-file").addEventListener("change", async (event) => {
       const file = event.target.files[0];
@@ -1340,6 +1361,7 @@
       }
     });
     $("copy-address").addEventListener("click", copyAddress);
+    $("copy-node-name").addEventListener("click", () => copyText(state.nickname, "名称复制成功"));
     $("load-miner").addEventListener("click", () => $("miner-file").click());
     $("miner-file").addEventListener("change", handleMinerFile);
     $("reset-miner").addEventListener("click", resetMiner);

@@ -37,6 +37,7 @@ from app.storage.sqlite_store import SQLiteStore
 from app.units import format_coins
 from app.web.hub import ConnectionHub
 from app.web.peers import Peers
+from app.web.presence import Presence
 
 NICKNAME_PATTERN = re.compile(r"^[\w\u4e00-\u9fff-]{1,12}$")
 LOGIN_NONCE_SECONDS = 300
@@ -76,6 +77,8 @@ class ClassroomService:
         self._observed_tip = self.chain.tip_hash
         self.mempool = Mempool(self.store, lambda: self.chain.state, log=self._log)
         self.peers = Peers(self.chain, self.settings.peers, self._on_peer_chain, self.submit_transaction)
+        self.peers.node_name = self.settings.node_name
+        self.peers.paused.update(self.settings.paused_peers)
         self.pool = MiningPool(
             self.chain,
             self.mempool,
@@ -93,6 +96,10 @@ class ClassroomService:
         self.wallet = (
             LocalWallet(self.config_path.with_suffix(".wallet.key")) if session and native_wallet else None
         )
+        self.presence = Presence(self.chain.state.domain, self.wallet)
+        self.peers.presence_messages = self.presence.messages
+        self.peers.on_presence = self.presence.accept
+        self._last_presence = 0.0
         self.local_miner = (
             LocalMiner(self._local_job, self._local_solution) if self.wallet and builtin_miner else None
         )
@@ -105,6 +112,7 @@ class ClassroomService:
             self.peers.start()
         if self.wallet is not None:
             self._local_player()
+            self._announce_presence(time.time())
         if self._tick_task is None:
             self._tick_task = asyncio.create_task(self._tick_loop(), name="classroom-tick")
 
@@ -126,9 +134,19 @@ class ClassroomService:
         if self.wallet is None:
             raise ClassroomError("此节点没有本机钱包")
         player = self.store.get_player_by_address(self.wallet.address)
+        nickname = self.settings.node_name
+        owner = self.store.get_player(nickname)
+        if owner is not None and owner["address"] != self.wallet.address:
+            raise ClassroomError("node_name 已被其他钱包使用，请修改配置中的节点名称")
         if player is None:
-            nickname = "本机-" + self.wallet.address[3:11]
             self.store.upsert_player(nickname, self.wallet.address, self.wallet.public_key, int(time.time()))
+            player = self.store.get_player_by_address(self.wallet.address)
+        elif player["nickname"] != nickname:
+            previous = player["nickname"]
+            self.store.rename_player(self.wallet.address, nickname)
+            for record in self.sessions.values():
+                if record["role"] == "student" and record["nickname"] == previous:
+                    record["nickname"] = nickname
             player = self.store.get_player_by_address(self.wallet.address)
         return player
 
@@ -166,14 +184,32 @@ class ClassroomService:
         if self.chain.session is None:
             raise ClassroomError("请选择课堂场次")
         normalized = settings_from_raw({"peers": [address]}).peers[0]
-        if normalized in self.settings.peers:
-            return {"peers": self.settings.peers}
-        updated = replace(self.settings, peers=[*self.settings.peers, normalized])
+        updated = replace(self.settings,
+                          peers=list(dict.fromkeys([*self.settings.peers, normalized])),
+                          paused_peers=[peer for peer in self.settings.paused_peers if peer != normalized])
         save_settings(updated, self.config_path)
         self.settings = updated
         self.peers.addresses = updated.peers
-        self.peers.tasks.append(asyncio.create_task(self.peers.dial(normalized)))
+        self.peers.connect_address(normalized)
         return {"peers": updated.peers}
+
+    async def disconnect_peer(self, address: str, *, delete: bool = False) -> dict[str, Any]:
+        normalized = settings_from_raw({"peers": [address]}).peers[0]
+        if normalized not in self.settings.peers:
+            raise ClassroomError("此节点不在已添加的列表中")
+        updated = replace(self.settings,
+                          peers=[peer for peer in self.settings.peers if not delete or peer != normalized],
+                          paused_peers=([peer for peer in self.settings.paused_peers if peer != normalized]
+                                        if delete else list(dict.fromkeys([*self.settings.paused_peers, normalized]))))
+        save_settings(updated, self.config_path)
+        self.settings = updated
+        await self.peers.disconnect_address(normalized)
+        self.peers.addresses = updated.peers
+        if delete:
+            self.peers.paused.discard(normalized)
+            self.peers.statuses.pop(normalized, None)
+            self.peers.log(f"已删除节点 {normalized}")
+        return {"peers": updated.peers, "paused_peers": updated.paused_peers}
 
     def _log(self, message: str) -> None:
         self.events.append({"at": int(time.time()), "message": message})
@@ -215,6 +251,8 @@ class ClassroomService:
         while True:
             await asyncio.sleep(TICK_SECONDS)
             now = time.time()
+            if now - self._last_presence >= 10:
+                self._announce_presence(now)
             if self.pool.tick(now)["refreshed"] and self.chain.session:
                 self.publish("mining_job_changed", {})
             self._expire_reservations(now)
@@ -342,12 +380,45 @@ class ClassroomService:
             self.store.touch_player(player["nickname"], int(now))
 
     # ---------- 视图 ----------
+    def _observed_wallets(self, now: float) -> dict[str, dict[str, Any]]:
+        mining = self.pool.stats(now)["miners"]
+        browsers = {row["address"] for row in self.hub.browser_participants()}
+        native = self.wallet.address if self.wallet else None
+        return {player["address"]: {
+                    "address": player["address"], "nickname": player["nickname"],
+                    "online": (player["address"] == native or player["address"] in browsers
+                               or now - int(player["last_seen"]) <= ONLINE_SECONDS),
+                    "hashrate": float(mining.get(player["address"], {}).get("hashrate", 0.0)),
+                } for player in self.store.list_players()}
+
+    def _announce_presence(self, now: float) -> None:
+        rows = sorted(self._observed_wallets(now).values(),
+                      key=lambda row: (not row["online"], row["address"]))
+        message = self.presence.create(rows, now)
+        if message is not None:
+            self.peers.relay(message)
+        self._last_presence = now
+
+    def _wallet_status(self, now: float) -> dict[str, dict[str, Any]]:
+        rows = self.presence.wallets(now)
+        for address, local in self._observed_wallets(now).items():
+            remote = rows.get(address)
+            if remote is None:
+                rows[address] = local
+            else:
+                rows[address] = {**local,
+                                 "nickname": local["nickname"] if local["online"] else remote["nickname"],
+                                 "online": local["online"] or remote["online"],
+                                 "hashrate": max(local["hashrate"], remote["hashrate"])}
+        return rows
+
     def nicknames(self) -> dict[str, str]:
-        return {player["address"]: player["nickname"] for player in self.store.list_players()}
+        return {**{address: row["nickname"] for address, row in self.presence.wallets(time.time()).items()},
+                **{player["address"]: player["nickname"] for player in self.store.list_players()}}
 
     def live_tick(self, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
-        players = self.store.list_players()
+        wallets = self._wallet_status(now)
         tick = {
             "chain": self.chain.snapshot(),
             "mempool": self.mempool.stats(),
@@ -357,12 +428,8 @@ class ClassroomService:
             "market": self.market_view()["listings"],
             "auctions": self.auctions_view(now),
             "announcement": self.announcement,
-            "online": sum(
-                1
-                for player in players
-                if now - int(player["last_seen"]) <= ONLINE_SECONDS
-            ),
-            "names": {player["address"]: player["nickname"] for player in players},
+            "online": sum(row["online"] for row in wallets.values()),
+            "names": {address: row["nickname"] for address, row in wallets.items()},
         }
         if self.chain.session is None:
             tick.update(pool=self.pool.stats(now), leaderboard=self.leaderboard(now))
@@ -382,17 +449,19 @@ class ClassroomService:
         state = self.chain.state
         rows: list[dict[str, Any]] = []
         players = {player["address"]: player for player in self.store.list_players()}
-        addresses = list(players)
+        wallets = self._wallet_status(now)
+        addresses = list(dict.fromkeys([*players, *wallets]))
         if self.chain.session:
-            addresses.extend(address for address in state.mining_income if address not in players)
+            addresses.extend(address for address in state.mining_income if address not in addresses)
         for address in addresses:
             player = players.get(address, {})
             mining = pool_stats.get(address, {})
+            observed = wallets.get(address, {})
             rows.append(
                 {
-                    "nickname": player.get("nickname", address[:12] + "…"),
+                    "nickname": observed.get("nickname", player.get("nickname", address[:12] + "…")),
                     "address": address,
-                    "hashrate": float(mining.get("hashrate", 0.0)),
+                    "hashrate": float(observed.get("hashrate", mining.get("hashrate", 0.0))),
                     "share_bits": int(mining.get("share_bits", self.settings.pool.initial_share_bits)),
                     "best_share_bits": int(mining.get("best_share_bits", player.get("best_share_bits", 0))),
                     "blocks_found": (state.mined_blocks.get(address, 0) if self.chain.session
@@ -402,7 +471,7 @@ class ClassroomService:
                     "mined": int(state.mining_income.get(address, 0)),
                     "balance": int(state.balance_of(address)),
                     "nfts": len(state.nfts_of(address)),
-                    "online": now - int(player.get("last_seen", 0)) <= ONLINE_SECONDS,
+                    "online": bool(observed.get("online", False)),
                     "banned": bool(player.get("banned", False)),
                 }
             )

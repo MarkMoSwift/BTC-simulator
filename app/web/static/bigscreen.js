@@ -67,7 +67,7 @@
     renderSubtitle();
     renderBoard($("board-hashrate"), tick.leaderboard.by_hashrate, "hashrate");
     renderBoard($("board-mined"), tick.leaderboard.by_mined, "mined");
-    $("hashrate-note").textContent = "算力与在线状态为本节点观测";
+    $("hashrate-note").textContent = "在线状态与算力综合本节点观测及联网节点通报；挖矿收益以链上记录为准";
     renderPackets(tick.packets.active);
     renderMarket(tick.market);
     renderAuctions(tick.auctions.active);

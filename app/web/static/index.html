@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>区块链科普模拟器 · 学生控制台</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=3.0.1-console5">
+  <link rel="stylesheet" href="/static/styles.css?v=3.0.2-identity1">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主内容</a>
@@ -50,6 +50,9 @@
       <span class="connection" id="connection"><i class="dot"></i><span id="connection-text">连接中</span></span>
       <span class="chip" id="identity" hidden>
         <strong id="me-nickname"></strong>
+        <button type="button" class="icon-button" id="copy-node-name" title="复制名称" aria-label="复制名称">
+          <svg class="icon"><use href="#i-copy"/></svg>
+        </button>
       </span>
       <a class="icon-button" href="/bigscreen" target="_blank" title="打开投影大屏">
         <svg class="icon"><use href="#i-monitor"/></svg>
@@ -173,10 +176,12 @@
     <section class="panel panel-nodes">
       <header class="panel-head"><h2>节点</h2></header>
       <form class="form" id="peer-form" hidden>
-        <label>连接独立节点<input id="peer-address" type="url" placeholder="http://192.168.1.23:8000" required></label>
-        <button type="submit" class="primary">连接节点</button>
+        <label for="peer-address">连接独立节点</label>
+        <div class="peer-connect-row"><input id="peer-address" type="text" placeholder="IP 地址或 http://192.168.1.23:8000" required>
+        <button type="submit" class="primary">连接节点</button></div>
         <p class="muted small">对方需要使用同一课堂邀请。</p>
       </form>
+      <ul id="configured-peers" class="list configured-peers" aria-label="独立节点连接列表" aria-live="polite"></ul>
       <p id="node-status" class="muted small">当前网页连接的节点</p>
       <ul id="node-participants" class="list node-participants" aria-live="polite"></ul>
       <ul class="log" id="node-log"></ul>
@@ -218,6 +223,6 @@
   <script src="/static/crypto.js"></script>
   <script src="/static/client.js?v=3.0.1"></script>
   <script src="/static/wallet-backup.js"></script>
-  <script src="/static/app.js?v=3.0.1-console6"></script>
+  <script src="/static/app.js?v=3.0.2-console4"></script>
 </body>
 </html>

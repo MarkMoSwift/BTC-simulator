@@ -92,7 +92,8 @@ def test_node_name_generated_once_and_persisted(tmp_path, raw):
     path = tmp_path / "config.local.json"
     path.write_text(json.dumps({"admin_key":"KEEPKEY", **raw}), encoding="utf-8")
     first = load_settings(path)
-    assert first.node_name.startswith("node-")
+    assert len(first.node_name) == 8
+    assert all(char in "0123456789abcdef" for char in first.node_name)
     assert first.peers == []
     assert first.admin_key == "KEEPKEY"
     assert load_settings(path).node_name == first.node_name

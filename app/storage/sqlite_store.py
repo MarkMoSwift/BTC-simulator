@@ -257,6 +257,12 @@ class SQLiteStore:
                 (nickname, address, public_key, int(created_at), int(created_at)),
             )
 
+    def rename_player(self, address: str, nickname: str) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "UPDATE players SET nickname = ? WHERE address = ?", (nickname, address)
+            )
+
     def get_player(self, nickname: str) -> dict[str, Any] | None:
         with self.lock:
             row = self.connection.execute(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -32,9 +33,17 @@ class Peers:
         self.on_tx = on_tx
         self.tasks: list[asyncio.Task] = []
         self.connections: set[asyncio.Queue] = set()
+        self.connection_info: dict[asyncio.Queue, dict[str, Any]] = {}
+        self.node_name = ""
+        self.node_id = secrets.token_hex(16)
         self.synced = asyncio.Event()
         self.events: list[dict[str, Any]] = []
         self.event_sequence = 0
+        self.dial_tasks: dict[str, asyncio.Task] = {}
+        self.paused: set[str] = set()
+        self.statuses: dict[str, str] = {}
+        self.presence_messages: Callable[[], list[dict[str, Any]]] = lambda: []
+        self.on_presence: Callable[[dict[str, Any]], bool] = lambda _message: False
 
     def log(self, message: str) -> None:
         self.event_sequence += 1
@@ -42,12 +51,39 @@ class Peers:
         self.events = self.events[-100:]
 
     def snapshot(self) -> dict[str, Any]:
+        outgoing = {row["address"]: row for row in self.connection_info.values()
+                    if row["direction"] == "outbound"}
+        peers = [{"address": address, "status": "paused" if address in self.paused
+                  else self.statuses.get(address, "connecting"), "direction": "outbound",
+                  "name": outgoing.get(address, {}).get("name", "")}
+                 for address in self.addresses]
+        peers.extend({**row, "status": "connected"} for row in self.connection_info.values()
+                     if row["direction"] == "inbound")
         return {"connected": len(self.connections), "configured": len(self.addresses),
-                "height": self.chain.height, "events": self.events.copy()}
+                "height": self.chain.height, "events": self.events.copy(),
+                "peers": peers}
+
+    def connect_address(self, address: str) -> None:
+        self.paused.discard(address)
+        task = self.dial_tasks.get(address)
+        if task is None or task.done():
+            self.statuses[address] = "connecting"
+            self.dial_tasks[address] = asyncio.create_task(self.dial(address))
+
+    async def disconnect_address(self, address: str) -> None:
+        self.paused.add(address)
+        task = self.dial_tasks.pop(address, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.statuses[address] = "paused"
+        self.log(f"已暂停连接 {address}，停止自动重试")
 
     def start(self) -> None:
-        self.tasks = [asyncio.create_task(self.dial(address)) for address in self.addresses]
-        if not self.addresses:
+        for address in self.addresses:
+            if address not in self.paused:
+                self.connect_address(address)
+        if not any(address not in self.paused for address in self.addresses):
             self.synced.set()
         else:
             self.tasks.append(asyncio.create_task(self._allow_offline()))
@@ -59,9 +95,12 @@ class Peers:
                 self.synced.set()
 
     async def stop(self) -> None:
-        for task in self.tasks:
+        tasks = [*self.tasks, *self.dial_tasks.values()]
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.dial_tasks.clear()
+        self.tasks.clear()
 
     def relay(self, message: dict[str, Any]) -> None:
         for queue in self.connections:
@@ -74,11 +113,14 @@ class Peers:
                                url.path + PATH, "", ""))
         while True:
             try:
+                self.statuses[address] = "connecting"
                 self.log(f"正在连接 {address}")
                 async with connect(endpoint, open_timeout=4, max_size=MAX_MESSAGE) as socket:
-                    await self.exchange(socket.send, socket.recv, address)
-            except (OSError, TimeoutError, WebSocketException, ValueError, KeyError, TypeError) as exc:
-                self.log(f"连接中断或失败 {address}（{type(exc).__name__}），稍后重试")
+                    await self.exchange(socket.send, socket.recv, address, direction="outbound")
+            except (OSError, asyncio.TimeoutError, WebSocketException, ValueError, KeyError, TypeError) as exc:
+                detail = " ".join(str(exc).split())[:120]
+                self.log(f"连接中断或失败 {address}（{type(exc).__name__}{': ' + detail if detail else ''}），稍后重试")
+            self.statuses[address] = "retrying"
             await asyncio.sleep(3)
 
     def locator(self) -> list[str]:
@@ -90,7 +132,7 @@ class Peers:
         return [self.chain.hashes[height] for height in heights]
 
     async def exchange(self, send: Callable[[str], Awaitable], receive: Callable[[], Awaitable],
-                       label: str = "接入节点") -> None:
+                       label: str = "接入节点", *, direction: str = "inbound") -> None:
         session = self.chain.session
         if session is None or len(self.connections) >= 16:
             return
@@ -120,14 +162,21 @@ class Peers:
             return
         queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self.connections.add(queue)
+        info = {"address": label, "direction": direction, "name": "", "node_id": ""}
+        self.connection_info[queue] = info
+        if label in self.addresses:
+            self.statuses[label] = "connected"
         self.log(f"连接成功 {label}：课堂与协议校验通过")
 
         async def sender() -> None:
             await write({"type": "tip", "hash": self.chain.tip_hash})
+            await write({"type": "node_info", "name": self.node_name, "node_id": self.node_id})
+            for message in self.presence_messages():
+                await write(message)
             while True:
                 try:
                     message = await asyncio.wait_for(queue.get(), 3)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     message = {"type": "tip", "hash": self.chain.tip_hash}
                 await write(message)
 
@@ -213,6 +262,16 @@ class Peers:
                         self.on_tx(message["tx"])
                     except (TxError, RuleError):
                         pass
+                elif kind == "node_info":
+                    name, node_id = message.get("name"), message.get("node_id")
+                    if isinstance(name, str) and len(name) <= 64:
+                        info["name"] = name
+                    if (isinstance(node_id, str) and len(node_id) == 32
+                            and all(character in "0123456789abcdef" for character in node_id)):
+                        info["node_id"] = node_id
+                elif kind == "presence":
+                    if self.on_presence(message):
+                        self.relay(message)
                 elif kind == "pending":
                     for tx, _ in self.chain.store.list_mempool()[:256]:
                         await write({"type": "tx", "tx": tx})
@@ -222,8 +281,13 @@ class Peers:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
+        except Exception as exc:
+            detail = " ".join(str(exc).split())[:120]
+            self.log(f"{label} 通信异常（{type(exc).__name__}{': ' + detail if detail else ''}）")
+            raise
         finally:
             self.connections.discard(queue)
+            self.connection_info.pop(queue, None)
             self.log(f"连接已断开 {label}")
             for task in tasks:
                 task.cancel()
