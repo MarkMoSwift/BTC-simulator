@@ -128,6 +128,7 @@
   class API {
     constructor(token) {
       this.token = token || "";
+      this.recoverSession = null;
     }
 
     headers(extra) {
@@ -138,14 +139,30 @@
       return headers;
     }
 
-    async request(path, options) {
+    async request(path, options, retryAuth = true) {
       const config = { ...(options || {}) };
       config.headers = this.headers(config.body ? { "Content-Type": "application/json" } : {});
-      const response = await fetch(path, config);
-      const text = await response.text();
-      const data = text ? JSON.parse(text) : {};
+      const rejectedToken = this.token;
+      const controller = new AbortController();
+      if (!config.signal) config.signal = controller.signal;
+      const timeout = global.setTimeout(() => controller.abort(), 15000);
+      let response, data;
+      try {
+        response = await fetch(path, config);
+        const text = await response.text();
+        data = text ? JSON.parse(text) : {};
+      } finally {
+        global.clearTimeout(timeout);
+      }
       if (!response.ok) {
-        throw new Error(data.detail || `请求失败（HTTP ${response.status}）`);
+        const error = new Error(data.detail || `请求失败（HTTP ${response.status}）`);
+        error.status = response.status;
+        const expired = response.status === 401 || ["请先登录", "登录状态已过期，请重新登录"].includes(data.detail);
+        if (expired && retryAuth && rejectedToken && this.recoverSession && !path.startsWith("/api/auth/")) {
+          await this.recoverSession(rejectedToken);
+          return this.request(path, options, false);
+        }
+        throw error;
       }
       return data;
     }
@@ -170,34 +187,99 @@
     }
 
     connect(token) {
+      this.close();
       this.closed = false;
       const scheme = global.location.protocol === "https:" ? "wss" : "ws";
       const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      this.socket = new WebSocket(`${scheme}://${global.location.host}${this.path}${query}`);
-      this.socket.onopen = () => this.onStatus(true);
-      this.socket.onmessage = (message) => {
+      const socket = this.socket = new WebSocket(`${scheme}://${global.location.host}${this.path}${query}`);
+      socket.onopen = () => { if (this.socket === socket) this.onStatus(true); };
+      socket.onmessage = (message) => {
+        if (this.socket !== socket) return;
         try {
           this.onEvent(JSON.parse(message.data));
         } catch (error) {
           console.warn("无法解析推送消息", error);
         }
       };
-      this.socket.onclose = () => {
+      socket.onclose = () => {
+        if (this.socket !== socket) return;
         this.onStatus(false);
         if (!this.closed) {
           this.retry = global.setTimeout(() => this.connect(token), 2000);
         }
       };
-      this.socket.onerror = () => this.socket.close();
+      socket.onerror = () => socket.close();
     }
 
     close() {
       this.closed = true;
       global.clearTimeout(this.retry);
       if (this.socket) {
-        this.socket.close();
+        const socket = this.socket;
+        this.socket = null;
+        socket.close();
       }
     }
+  }
+
+  // 复制实时信息时保留选区，释放选区后只补画最新状态。
+  const pendingRenders = new Map();
+  const renderedHtml = new WeakMap();
+  let selectionStart = null;
+
+  const flushRenders = () => {
+    for (const [element, render] of [...pendingRenders]) {
+      if (!element.isConnected) pendingRenders.delete(element);
+      else if (!deferWhileSelected(element, render)) render();
+    }
+  };
+  document.addEventListener("pointerdown", event => {
+    if (event.button === 0) selectionStart = event.target;
+  });
+  const finishSelectionDrag = () => { selectionStart = null; flushRenders(); };
+  document.addEventListener("pointerup", finishSelectionDrag);
+  document.addEventListener("pointercancel", finishSelectionDrag);
+  global.addEventListener("blur", finishSelectionDrag);
+
+  function deferWhileSelected(element, render) {
+    if (selectionStart && (element.contains(selectionStart) || selectionStart.contains(element))) {
+      pendingRenders.set(element, render);
+      return true;
+    }
+    const selection = global.getSelection();
+    if (selection && !selection.isCollapsed) {
+      for (let index = 0; index < selection.rangeCount; index += 1) {
+        if (selection.getRangeAt(index).intersectsNode(element)) {
+          pendingRenders.set(element, render);
+          return true;
+        }
+      }
+    }
+    pendingRenders.delete(element);
+    return false;
+  }
+
+  document.addEventListener("selectionchange", flushRenders);
+
+  function setText(element, value) {
+    const text = String(value);
+    if (element.textContent === text) {
+      pendingRenders.delete(element);
+      return;
+    }
+    if (!deferWhileSelected(element, () => setText(element, text))) element.textContent = text;
+  }
+
+  function setHtml(element, html) {
+    const previous = renderedHtml.get(element);
+    const current = element.innerHTML;
+    if (current === html || (previous?.html === html && previous.dom === current)) {
+      pendingRenders.delete(element);
+      return;
+    }
+    if (deferWhileSelected(element, () => setHtml(element, html))) return;
+    element.innerHTML = html;
+    renderedHtml.set(element, {html, dom: element.innerHTML});
   }
 
   function notify(message, kind = "info") {
@@ -226,6 +308,9 @@
     escapeHtml,
     shortAddress,
     notify,
+    setText,
+    setHtml,
+    deferWhileSelected,
     API,
     Feed,
   };

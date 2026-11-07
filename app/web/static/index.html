@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>区块链科普模拟器 · 学生控制台</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=3.0.2-identity1">
+  <link rel="stylesheet" href="/static/styles.css?v=3.0.2-node-views">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主内容</a>
@@ -42,18 +42,12 @@
     <div class="topbar-right">
       <div class="topbar-wallet" id="topbar-wallet" hidden>
         <label for="wallet-address">我的地址</label>
-        <input id="wallet-address" type="text" readonly spellcheck="false" aria-label="我的钱包地址">
-        <button type="button" class="icon-button" id="copy-address" title="复制钱包地址" aria-label="复制钱包地址">
-          <svg class="icon"><use href="#i-copy"/></svg>
-        </button>
+        <input id="wallet-address" type="text" readonly spellcheck="false" aria-label="点击复制我的钱包地址" title="点击复制钱包地址">
       </div>
       <span class="connection" id="connection"><i class="dot"></i><span id="connection-text">连接中</span></span>
-      <span class="chip" id="identity" hidden>
+      <button type="button" class="chip" id="identity" hidden title="点击复制昵称" aria-label="复制昵称">
         <strong id="me-nickname"></strong>
-        <button type="button" class="icon-button" id="copy-node-name" title="复制名称" aria-label="复制名称">
-          <svg class="icon"><use href="#i-copy"/></svg>
-        </button>
-      </span>
+      </button>
       <a class="icon-button" href="/bigscreen" target="_blank" title="打开投影大屏">
         <svg class="icon"><use href="#i-monitor"/></svg>
       </a>
@@ -129,8 +123,10 @@
           <label>个数<input id="packet-count" required type="number" min="1" max="50" value="5"></label>
           <label>手续费<input id="packet-fee" inputmode="decimal" value="0.1"></label>
         </div>
-        <label>留言<input id="packet-note" maxlength="40" autocomplete="off" placeholder="新年快乐"></label>
-        <button type="submit" class="primary"><svg class="icon"><use href="#i-gift"/></svg>发红包</button>
+        <div class="packet-send-row">
+          <label>留言<input id="packet-note" maxlength="40" autocomplete="off" placeholder="新年快乐"></label>
+          <button type="submit" class="primary"><svg class="icon"><use href="#i-gift"/></svg>发红包</button>
+        </div>
       </form>
       <div class="packet-feed"><ul class="list" id="packet-list"></ul></div>
     </section>
@@ -177,13 +173,14 @@
       <header class="panel-head"><h2>节点</h2></header>
       <form class="form" id="peer-form" hidden>
         <label for="peer-address">连接独立节点</label>
-        <div class="peer-connect-row"><input id="peer-address" type="text" placeholder="IP 地址或 http://192.168.1.23:8000" required>
+        <div class="peer-connect-row"><input id="peer-address" type="text" placeholder="IP 地址或 IP:端口（默认 8000）" required>
         <button type="submit" class="primary">连接节点</button></div>
         <p class="muted small">对方需要使用同一课堂邀请。</p>
       </form>
       <ul id="configured-peers" class="list configured-peers" aria-label="独立节点连接列表" aria-live="polite"></ul>
       <p id="node-status" class="muted small">当前网页连接的节点</p>
-      <ul id="node-participants" class="list node-participants" aria-live="polite"></ul>
+      <h3 class="small" id="web-participants-title">网页参与者</h3>
+      <ul id="node-participants" class="list node-participants" aria-label="网页参与者" aria-live="polite"></ul>
       <ul class="log" id="node-log"></ul>
     </section>
     <div class="node-companion">
@@ -209,9 +206,9 @@
   <div class="overlay" id="login-overlay">
     <form class="login-card" id="login-form">
       <h1>进入课堂</h1>
-      <p class="muted">昵称会和这台设备上的钱包绑定，私钥只保存在浏览器里，服务器看不到它。</p>
+      <p class="muted">私钥只保存在浏览器里，服务器看不到它。同一钱包可以修改昵称，地址和已有资产不变。</p>
       <label>你的昵称或者姓名<input id="login-nickname" required maxlength="12" autocomplete="off" placeholder="例如 小明"></label>
-      <button type="submit" class="primary"><svg class="icon"><use href="#i-zap"/></svg>开始挖矿</button>
+      <button type="submit" class="primary">进入</button>
       <p class="error" id="login-error" hidden></p>
       <p class="muted small">本机钱包地址：<code id="login-address">--</code></p>
       <label>导入已有钱包的备份密码<input id="login-backup-password" type="password" autocomplete="current-password"></label>
@@ -221,8 +218,8 @@
   </div>
 
   <script src="/static/crypto.js"></script>
-  <script src="/static/client.js?v=3.0.1"></script>
+  <script src="/static/client.js?v=3.0.2-recovery1"></script>
   <script src="/static/wallet-backup.js"></script>
-  <script src="/static/app.js?v=3.0.2-console4"></script>
+  <script src="/static/app.js?v=3.0.2-block-hash"></script>
 </body>
 </html>

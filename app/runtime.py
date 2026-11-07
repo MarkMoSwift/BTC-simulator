@@ -311,9 +311,22 @@ class ClassroomService:
         if player is None:
             existing = self.store.get_player_by_address(address)
             if existing is not None:
-                raise ClassroomError(f"这个钱包已经绑定到昵称 {existing['nickname']}")
-            self.store.upsert_player(nickname, address, public_key, now)
-            self._log(f"新同学加入：{nickname}")
+                if existing["banned"]:
+                    raise ClassroomError("这个钱包已被教师停用")
+                if self.wallet is not None and address == self.wallet.address:
+                    raise ClassroomError("本机节点钱包名称请在 node_name 中修改")
+                previous = existing["nickname"]
+                self.store.rename_player(address, nickname)
+                self.store.touch_player(nickname, now)
+                for record in self.sessions.values():
+                    if record["role"] == "student" and record["nickname"] == previous:
+                        record["nickname"] = nickname
+                for identity in self.hub.identities.values():
+                    if identity.get("address") == address:
+                        identity["nickname"] = nickname
+            else:
+                self.store.upsert_player(nickname, address, public_key, now)
+                self._log(f"新同学加入：{nickname}")
         else:
             if player["banned"]:
                 raise ClassroomError("这个昵称已被教师停用")

@@ -13,6 +13,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from app.core.block import BlockError, block_hash
+from app.peer_address import peer_url
 from app.core.chain import Blockchain, FutureBlock
 from app.core.consensus import PROTOCOL_MAJOR
 from app.core.state import RuleError
@@ -108,7 +109,7 @@ class Peers:
                 queue.put_nowait(message)
 
     async def dial(self, address: str) -> None:
-        url = urlsplit(address)
+        url = urlsplit(peer_url(address))
         endpoint = urlunsplit(("wss" if url.scheme == "https" else "ws", url.netloc,
                                url.path + PATH, "", ""))
         while True:

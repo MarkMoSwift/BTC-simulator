@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-import uvicorn
+from app.web.listener import run_server
 
 from app.config import (
     ConfigError, SESSION_VERSION, VERSION, load_settings, resolve_config_path, save_settings,
@@ -82,7 +82,7 @@ def main() -> None:
     service = ClassroomService(config_path)
     if not args.quiet:
         print_banner(service)
-    uvicorn.run(create_app(service), host=settings.web_host, port=int(settings.web_port),
+    run_server(create_app(service), host=settings.web_host, port=int(settings.web_port),
                 log_level="info", proxy_headers=False, **tls)
 
 

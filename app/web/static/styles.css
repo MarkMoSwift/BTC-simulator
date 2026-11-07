@@ -216,6 +216,8 @@ code,
   min-width: 0;
   width: min(48ch, 34vw);
   font-family: monospace;
+  cursor: pointer;
+  text-overflow: ellipsis;
 }
 
 .brand {
@@ -306,7 +308,7 @@ code,
   font-weight: 500;
 }
 
-#identity { padding: 3px; }
+#identity { padding: 3px; color: var(--ink); border: 0; cursor: pointer; }
 #me-nickname {
   display: block;
   width: 12ch;
@@ -1109,6 +1111,10 @@ a.ghost {
   display: flex;
   flex-flow: row wrap;
   gap: 10px;
+  max-height: none;
+  overflow: visible;
+  flex-shrink: 0;
+  padding-bottom: 2px;
 }
 
 .miner-item {
@@ -1119,6 +1125,7 @@ a.ghost {
   padding: 16px;
   border-radius: 12px;
   border: 1px solid var(--line);
+  flex-shrink: 0;
 }
 
 .miner-config-form {
@@ -1156,12 +1163,48 @@ a.ghost {
 @media (max-width: 640px) {
   .topbar {
     padding: 10px 14px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
   }
 
   .topbar-right {
-    flex-basis: 100%;
-    flex-wrap: wrap;
+    display: contents;
   }
+
+  .topbar .brand { grid-column: 1; grid-row: 1; gap: 6px; }
+  .topbar .brand-icon { width: 26px; height: 26px; padding: 5px; flex: none; }
+  .topbar .brand-text strong { font-size: 14px; }
+  .topbar .connection {
+    display: inline-flex;
+    grid-column: 2;
+    grid-row: 1;
+    padding: 5px 6px;
+    gap: 4px;
+    font-size: 11px;
+  }
+  .topbar-wallet:not([hidden]) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin-right: calc(28% + 92px);
+  }
+  .topbar-wallet label { display: none; }
+  .topbar-wallet input { width: 100%; padding-inline: 8px; height: 36px; font-size: 12px; }
+  .topbar #identity {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: end;
+    margin-right: 84px;
+    width: 28%;
+    height: 36px;
+    justify-content: center;
+  }
+  .topbar #me-nickname { width: 100%; max-width: none; font-size: 12px; }
+  .topbar-right > a.icon-button {
+    grid-column: 1 / -1; grid-row: 2; justify-self: end; margin-right: 42px;
+  }
+  .topbar #logout { grid-column: 1 / -1; grid-row: 2; justify-self: end; }
+  .topbar-right > .icon-button { width: 36px; height: 36px; }
 
   .layout {
     padding: 14px 14px 36px;
@@ -1171,9 +1214,6 @@ a.ghost {
     padding: 16px;
   }
 
-  .connection {
-    display: none;
-  }
 
   .form.inline {
     flex-direction: column;
@@ -1247,7 +1287,9 @@ a.ghost {
 .peer-connect-row input { flex: 1; min-width: 0; width: 0; }
 .peer-connect-row button, .peer-actions button { flex-shrink: 0; white-space: nowrap; }
 .configured-peers { max-height: 18rem; flex-shrink: 0; }
-.configured-peer .grow { min-width: 0; overflow-wrap: anywhere; }
+.configured-peer { display: grid; grid-template-columns: minmax(4ch,.7fr) minmax(0,2.5fr) 2em minmax(6em,1.25fr) auto; align-items: center; gap: 8px; }
+.configured-peer > :not(.peer-actions) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.configured-peer .peer-status { font-size: .7rem; }
 .peer-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .panel-mining .stats { grid-template-columns: repeat(5,minmax(0,1fr)); }
 .panel-mining .stats.stats-wide { grid-template-columns: repeat(2,minmax(0,1.4fr)) repeat(3,minmax(0,.8fr)); }
@@ -1256,6 +1298,9 @@ a.ghost {
 .stat-mempool small { color: var(--ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .stat-mempool .stat-label { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; white-space: nowrap; }
 .stat-mempool small { font-size: .6875rem; }
+.packet-send-row { display: flex; align-items: flex-end; gap: 10px; }
+.packet-send-row > label { flex: 1; min-width: 0; }
+.packet-send-row > button { flex: 0 0 auto; }
 .packet-feed { position: relative; flex: 1; min-height: 140px; }
 #packet-list { position: absolute; inset: 0; max-height: none; }
 #packet-list > li { flex-shrink: 0; }
@@ -1269,7 +1314,14 @@ a.ghost {
 .panel-nodes { align-self: stretch; min-height: 28rem; }
 #node-log { max-height: 36rem; }
 #node-log li { overflow-wrap: anywhere; }
-.node-participant { flex-direction: column; align-items: flex-start; gap: 4px; overflow-wrap: anywhere; }
+.provider-participant { flex-direction: column; align-items: stretch; gap: 6px; overflow-wrap: anywhere; }
+.participant-main, .participant-details { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; }
+.browser-participant { display: grid; grid-template-columns: minmax(4ch,1fr) minmax(0,2fr) auto auto auto; gap: 8px; }
+.browser-participant > * { min-width: 0; overflow-wrap: anywhere; }
+.block-row { display: grid; grid-template-columns: 8ch auto minmax(0,1fr) auto; gap: 8px; font-variant-numeric: tabular-nums; }
+.block-row > * { min-width: 0; white-space: nowrap; }
+.block-hash { overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.block-difficulty { font-size: .75rem; }
 .node-participants { max-height: 24rem; flex-shrink: 0; }
 #nft-list, #auction-list { flex-shrink: 0; max-height: 20rem; }
 .photo-toggle { border-radius: 50%; width: 40px; height: 40px; border: 1px solid var(--accent); background: var(--accent-soft); font-size: 1.6rem; cursor: pointer; }

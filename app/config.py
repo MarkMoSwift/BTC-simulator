@@ -1,7 +1,6 @@
 """本地节点配置、场次信息与证书路径。"""
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 import secrets
@@ -9,7 +8,7 @@ import ssl
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from app.peer_address import peer_url
 
 from app.units import SAT_PER_COIN
 from app.core.consensus import Session
@@ -200,23 +199,10 @@ def settings_from_raw(raw: dict[str, Any]) -> Settings:
     normalized_peers = []
     for peer in peers:
         peer = peer.strip().rstrip("/")
-        if "://" not in peer:
-            try:
-                ip = ipaddress.ip_address(peer)
-            except ValueError as exc:
-                raise ConfigError("节点地址须为 IP 或 HTTP/HTTPS URL") from exc
-            host_literal = f"[{ip}]" if ip.version == 6 else str(ip)
-            peer = f"http://{host_literal}:8000"
         try:
-            parsed = urlsplit(peer)
-            port_number = parsed.port
+            peer_url(peer)
         except ValueError as exc:
-            raise ConfigError("peers 中的节点地址不合法") from exc
-        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-            or parsed.path not in {"", "/"}
-            or parsed.username is not None or parsed.password is not None
-            or parsed.query or parsed.fragment or (port_number is not None and port_number < 1)):
-            raise ConfigError("peers 中的节点地址必须是无凭据的 HTTP/HTTPS 地址")
+            raise ConfigError("节点地址须为 IP、IP:端口或无凭据的 HTTP/HTTPS 地址") from exc
         if peer not in normalized_peers:
             normalized_peers.append(peer)
     tls = raw.get("tls", {})

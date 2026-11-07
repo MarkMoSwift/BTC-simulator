@@ -4,7 +4,7 @@
 (function () {
   "use strict";
 
-  const { Feed, formatCoins, formatHashrate, formatTime, formatCountdown, auctionPrice, escapeHtml, shortAddress, notify } = window.Sim;
+  const { setText, setHtml, deferWhileSelected, Feed, formatCoins, formatHashrate, formatTime, formatCountdown, auctionPrice, escapeHtml, shortAddress, notify } = window.Sim;
 
   const BOARD_ROWS = 10;
   const STRIP_ROWS = 4;
@@ -46,7 +46,7 @@
   }
 
   function handleConnection(online) {
-    $("screen-sub").textContent = online ? "" : "与大屏的连接已断开，正在重连…";
+    setText($("screen-sub"), online ? "" : "与大屏的连接已断开，正在重连…");
     if (online && state.tick) {
       renderSubtitle();
     }
@@ -60,14 +60,14 @@
     state.chain = tick.chain;
     state.blocks = tick.recent_blocks || [];
     state.names = Object.fromEntries(tick.leaderboard.rows.map((row) => [row.address, row.nickname]));
-    $("metric-height").textContent = tick.chain.height.toLocaleString();
-    $("metric-difficulty").textContent = `${tick.chain.difficulty} 位`;
-    $("metric-hashrate").textContent = formatHashrate(tick.leaderboard.network_hashrate);
-    $("metric-online").textContent = `${tick.online} / ${tick.leaderboard.rows.length}`;
+    setText($("metric-height"), tick.chain.height.toLocaleString());
+    setText($("metric-difficulty"), `${tick.chain.difficulty} 位`);
+    setText($("metric-hashrate"), formatHashrate(tick.leaderboard.network_hashrate));
+    setText($("metric-online"), `${tick.online} / ${tick.leaderboard.rows.length}`);
     renderSubtitle();
     renderBoard($("board-hashrate"), tick.leaderboard.by_hashrate, "hashrate");
     renderBoard($("board-mined"), tick.leaderboard.by_mined, "mined");
-    $("hashrate-note").textContent = "在线状态与算力综合本节点观测及联网节点通报；挖矿收益以链上记录为准";
+    setText($("hashrate-note"), "在线状态与算力综合本节点观测及联网节点通报；挖矿收益以链上记录为准");
     renderPackets(tick.packets.active);
     renderMarket(tick.market);
     renderAuctions(tick.auctions.active);
@@ -80,17 +80,18 @@
     if (!chain) {
       return;
     }
-    $("screen-sub").textContent =
+    setText($("screen-sub"),
       `链上已有 ${chain.height} 个区块 · 下一块奖励 ${formatCoins(chain.subsidy)} 币 · ` +
-      `目标出块 ${chain.target_block_seconds} 秒`;
+      `目标出块 ${chain.target_block_seconds} 秒`);
   }
 
   /* ---------- 排行榜 ---------- */
 
   function renderBoard(list, rows, mode) {
+    if (deferWhileSelected(list, () => renderBoard(list, rows, mode))) return;
     if (!rows.length) {
       if (!list.querySelector(".board-empty")) {
-        list.innerHTML = `<li class="board-empty">还没有同学加入，用浏览器打开课堂网址即可开始挖矿</li>`;
+        setHtml(list, `<li class="board-empty">还没有同学加入，用浏览器打开课堂网址即可开始挖矿</li>`);
       }
       return;
     }
@@ -120,17 +121,17 @@
         node.classList.add(`place-${place}`);
       }
       list.appendChild(node);
-      node.querySelector(".board-rank").textContent = String(place);
-      node.querySelector(".board-name").innerHTML =
-        `${escapeHtml(row.nickname)}<span class="board-state${row.online ? " is-online" : ""}"></span>`;
+      setText(node.querySelector(".board-rank"), String(place));
+      setHtml(node.querySelector(".board-name"),
+        `${escapeHtml(row.nickname)}<span class="board-state${row.online ? " is-online" : ""}"></span>`);
       if (mode === "hashrate") {
-        node.querySelector(".board-value").textContent = formatHashrate(row.hashrate);
-        node.querySelector(".board-meta").textContent =
-          `${row.blocks_found} 块 · 累计 ${formatCoins(row.mined, 2)} 币`;
+        setText(node.querySelector(".board-value"), formatHashrate(row.hashrate));
+        setText(node.querySelector(".board-meta"),
+          `${row.blocks_found} 块 · 累计 ${formatCoins(row.mined, 2)} 币`);
       } else {
-        node.querySelector(".board-value").textContent = `${formatCoins(row.mined, 2)} 币`;
-        node.querySelector(".board-meta").textContent =
-          `${formatHashrate(row.hashrate)} · 挖到 ${row.blocks_found} 块`;
+        setText(node.querySelector(".board-value"), `${formatCoins(row.mined, 2)} 币`);
+        setText(node.querySelector(".board-meta"),
+          `${formatHashrate(row.hashrate)} · 挖到 ${row.blocks_found} 块`);
       }
       if (!row.online) {
         node.classList.add("is-offline");
@@ -171,7 +172,7 @@
         <span class="strip-muted">难度 ${block.difficulty} · ${formatTime(block.timestamp)}</span>
       </li>`,
     );
-    list.innerHTML = rows.join("") || `<li class="strip-empty">链上还没有区块</li>`;
+    setHtml(list, rows.join("") || `<li class="strip-empty">链上还没有区块</li>`);
   }
 
   function renderPackets(packets) {
@@ -184,7 +185,7 @@
         <span class="strip-muted">还剩 ${left} 个${note}</span>
       </li>`;
     });
-    $("strip-packets").innerHTML = rows.join("") || `<li class="strip-empty">暂时没有红包，挖到币的同学可以发一个</li>`;
+    setHtml($("strip-packets"), rows.join("") || `<li class="strip-empty">暂时没有红包，挖到币的同学可以发一个</li>`);
   }
 
   function renderMarket(listings) {
@@ -195,7 +196,7 @@
         <span class="strip-muted">卖家 ${escapeHtml(item.seller_name)}</span>
       </li>`,
     );
-    $("strip-market").innerHTML = rows.join("") || `<li class="strip-empty">市场上还没有挂单的藏品</li>`;
+    setHtml($("strip-market"), rows.join("") || `<li class="strip-empty">市场上还没有挂单的藏品</li>`);
   }
 
   function renderAuctions(auctions) {
@@ -209,7 +210,7 @@
         }</span>
       </li>`,
     );
-    $("strip-auctions").innerHTML = rows.join("") || `<li class="strip-empty">拍卖场还空着</li>`;
+    setHtml($("strip-auctions"), rows.join("") || `<li class="strip-empty">拍卖场还空着</li>`);
   }
 
   function renderAnnouncement(announcement) {
@@ -218,7 +219,7 @@
       box.hidden = true;
       return;
     }
-    box.textContent = `老师通知：${announcement.message}`;
+    setText(box, `老师通知：${announcement.message}`);
     box.hidden = false;
   }
 
@@ -255,24 +256,24 @@
       return;
     }
     if (chain.height === 0) {
-      $("metric-latest").textContent = "等待第一个区块";
+      setText($("metric-latest"), "等待第一个区块");
       return;
     }
     const seconds = Math.max(Math.floor(Date.now() / 1000) - chain.tip_timestamp, 0);
-    $("metric-latest").textContent = seconds < 60 ? `${seconds} 秒前` : `${Math.floor(seconds / 60)} 分钟前`;
+    setText($("metric-latest"), seconds < 60 ? `${seconds} 秒前` : `${Math.floor(seconds / 60)} 分钟前`);
   }
 
   async function boot() {
     try {
       const publicState = await new Sim.API().get("/api/public");
-      $("screen-classroom").textContent = publicState.classroom;
+      setText($("screen-classroom"), publicState.classroom);
       state.chain = publicState.chain;
       state.blocks = publicState.recent_blocks || [];
       renderSubtitle();
       renderBlocks();
       renderAnnouncement(publicState.announcement);
     } catch (problem) {
-      $("screen-sub").textContent = `读取课堂信息失败：${problem.message}`;
+      setText($("screen-sub"), `读取课堂信息失败：${problem.message}`);
     }
     feed.connect("");
     setInterval(tickClock, 1000);

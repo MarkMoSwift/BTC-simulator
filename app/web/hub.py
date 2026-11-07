@@ -8,6 +8,8 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from app.peer_address import peer_source
+
 
 class ConnectionHub:
     def __init__(self) -> None:
@@ -42,11 +44,18 @@ class ConnectionHub:
                 continue
             address = identity["address"]
             row = wallets.setdefault(address, {"address": address, "nickname": identity["nickname"],
-                                               "connections": 0, "source_origins": []})
+                                               "connections": 0, "source_origins": [], "source_ips": []})
             row["connections"] += 1
             origin = identity.get("source_origin")
             if origin and origin not in row["source_origins"]:
                 row["source_origins"].append(origin)
+            source_ip = identity.get("source_ip")
+            if not source_ip:
+                client = getattr(socket, "client", None)
+                if client:
+                    source_ip = peer_source(client.host, 0).rsplit(":", 1)[0].strip("[]")
+            if source_ip and source_ip not in row["source_ips"]:
+                row["source_ips"].append(source_ip)
         return sorted(wallets.values(), key=lambda row: (row["nickname"], row["address"]))
 
     async def start(self) -> None:
