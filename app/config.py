@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from app.units import SAT_PER_COIN
 from app.core.consensus import Session
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 SESSION_VERSION = VERSION
 
 

@@ -1,7 +1,6 @@
 /* 学生控制台：登录、挖矿、钱包、红包、藏品市场。
 
-   私钥在这台设备上生成并保存在 localStorage，服务器只收到公钥和签名。
-   矿工程序默认用服务器上的 miner.js，也可以载入本机改过的版本。 */
+   私钥在这台设备上生成并保存在 localStorage，服务器只收到公钥和签名。 */
 (function () {
   "use strict";
 
@@ -11,9 +10,10 @@
   const STORAGE_NICKNAME = "btc-sim.nickname";
   const STORAGE_TOKEN = "btc-sim.token";
   const STORAGE_MINER = "btc-sim.custom-miner";
+  const STORAGE_MINING_INTENT = "btc-sim.browser-mining-intent";
   const JOB_POLL_MS = 4000;
   const RATE_WINDOW_MS = 4000;
-  const LOG_LIMIT = 12;
+  const LOG_LIMIT = 200;
   const MINER_MAX_BYTES = 262144;
 
   const $ = (id) => document.getElementById(id);
@@ -32,6 +32,9 @@
     me: null,
     tick: null,
     blocks: [],
+    blockPages: 1,
+    loadingBlocks: false,
+    blocksRefreshPending: false,
     worker: null,
     workerUrl: "",
     customMiner: false,
@@ -111,6 +114,7 @@
   }
 
   function logout() {
+    rememberBrowserMining(false);
     localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_NICKNAME);
     location.reload();
@@ -120,6 +124,7 @@
     const token = localStorage.getItem(STORAGE_TOKEN);
     const nickname = localStorage.getItem(STORAGE_NICKNAME);
     if (!token || !nickname) {
+      rememberBrowserMining(false);
       return false;
     }
     api.token = token;
@@ -130,6 +135,7 @@
       enterConsole(me);
       return true;
     } catch (problem) {
+      rememberBrowserMining(false);
       localStorage.removeItem(STORAGE_TOKEN);
       api.token = "";
       return false;
@@ -156,6 +162,8 @@
       $("logout").hidden = true;
       updateMineButton();
       renderMiningStats();
+    } else {
+      resumeBrowserMining();
     }
   }
 
@@ -252,6 +260,7 @@
   function handleWorkerError(event) {
     event.preventDefault();
     state.mining = false;
+    rememberBrowserMining(false);
     state.rate = 0;
     state.rateSamples = [];
     updateMineButton();
@@ -313,12 +322,14 @@
     state.workerShareBits = 0;
     updateMineButton();
     ensureWorker();
+    rememberBrowserMining(true);
     pushLog("开始挖矿，正在向服务器要作业…");
     pollJob();
   }
 
   function stopMining() {
     state.mining = false;
+    rememberBrowserMining(false);
     updateMineButton();
     if (state.worker) {
       state.worker.postMessage({ type: "stop" });
@@ -327,6 +338,35 @@
     state.rateSamples = [];
     renderMiningStats();
     pushLog("已暂停挖矿");
+  }
+
+  function rememberBrowserMining(running) {
+    if (state.localWallet) return;
+    try {
+      if (running && state.address && state.transactionDomain) {
+        sessionStorage.setItem(STORAGE_MINING_INTENT, JSON.stringify({
+          address: state.address, domain: state.transactionDomain,
+        }));
+      } else sessionStorage.removeItem(STORAGE_MINING_INTENT);
+    } catch { /* Storage restrictions leave manual mining available. */ }
+  }
+
+  function resumeBrowserMining() {
+    if (state.localWallet || state.mining) return false;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(STORAGE_MINING_INTENT) || "null");
+      const navigation = performance.getEntriesByType("navigation")[0];
+      if (navigation?.type === "reload" && saved?.address === state.address
+          && state.transactionDomain && saved.domain === state.transactionDomain) {
+        startMining();
+        pushLog("刷新后已恢复挖矿");
+        return true;
+      }
+      rememberBrowserMining(false);
+    } catch {
+      rememberBrowserMining(false);
+    }
+    return false;
   }
 
   function updateMineButton() {
@@ -445,13 +485,37 @@
     }
   }
 
-  async function loadRecentBlocks() {
+  async function loadRecentBlocks(more = false) {
+    if (state.loadingBlocks) {
+      if (!more) state.blocksRefreshPending = true;
+      return;
+    }
+    state.loadingBlocks = true;
+    $("load-more-blocks").disabled = true;
     try {
-      const data = await api.get("/api/blocks?limit=8");
-      state.blocks = data.blocks;
+      const pages = state.blockPages + (more ? 1 : 0);
+      // Anchor pagination to the first snapshot height, even if new blocks arrive.
+      const first = await api.get("/api/blocks?limit=20");
+      const blocks = [...first.blocks];
+      let stale = false;
+      for (let page = 1; page < pages && blocks.length && blocks.at(-1).height > 0; page++) {
+        const data = await api.get(`/api/blocks?limit=20&before=${blocks.at(-1).height}&tip=${blocks[0].hash}`);
+        if (data.stale) { stale = true; break; }
+        blocks.push(...data.blocks);
+      }
+      if (stale) { state.blocksRefreshPending = true; return; }
+      state.blockPages = pages;
+      state.blocks = blocks;
       renderBlocks();
     } catch (problem) {
       pushLog(`读取区块失败：${problem.message}`, "error");
+    } finally {
+      state.loadingBlocks = false;
+      $("load-more-blocks").disabled = false;
+      if (state.blocksRefreshPending) {
+        state.blocksRefreshPending = false;
+        setTimeout(() => loadRecentBlocks(), 500);
+      }
     }
   }
 
@@ -517,7 +581,7 @@
     event.preventDefault();
     try {
       const receiver = resolveReceiver($("transfer-receiver").value);
-      const amount = parseCoins($("transfer-amount").value);
+      const amount = parseCoins($("transfer-amount").value.trim() || "1.5");
       const fee = parseCoins($("transfer-fee").value || "0.1");
       const note = $("transfer-note").value.trim();
       await submitTransaction("transfer", { receiver, amount, fee, ...(note ? { note } : {}) });
@@ -532,8 +596,8 @@
   async function handlePacketCreate(event) {
     event.preventDefault();
     try {
-      const total = parseCoins($("packet-total").value);
-      const count = Number($("packet-count").value);
+      const total = parseCoins($("packet-total").value.trim() || "5");
+      const count = Number($("packet-count").value || "5");
       const note = $("packet-note").value.trim();
       await submitTransaction("packet_create", {
         total,
@@ -574,9 +638,12 @@
   async function handleMint(event) {
     event.preventDefault();
     try {
+      const file = $("mint-photo").files[0];
+      if (file && file.size > 8 * 1024 * 1024) throw new Error("原图不能超过 8 MiB");
+      if (file && !["image/jpeg", "image/png", "image/gif", "image/webp"].includes(file.type)) throw new Error("照片支持 JPEG、PNG、GIF 或 WebP");
       const photo = state.transactionDomain ? {
-        thumbnail: (await photoThumbnail($("mint-photo").files[0])).split(",")[1],
-        quantity: Number($("mint-quantity").value),
+        thumbnail: (await photoThumbnail(file)).split(",")[1],
+        quantity: Number($("mint-quantity").value || "1"),
       } : {};
       await submitTransaction("nft_mint", {
         name: $("mint-name").value.trim(),
@@ -584,7 +651,22 @@
         fee: economyFee("nft"),
         ...photo,
       });
-      $("mint-form").reset();
+      if (file && photo.thumbnail) {
+        const bytes = Uint8Array.from(atob(photo.thumbnail), character => character.charCodeAt(0));
+        const id = SimCrypto.bytesToHex(SimCrypto.sha256d(bytes));
+        try {
+          const response = await fetch(`/api/originals/${id}`, {
+            method: "POST", headers: {Authorization: `Bearer ${state.token}`, "Content-Type": file.type}, body: file,
+          });
+          if (!response.ok) throw new Error("原图保存失败");
+        } catch {
+          notify("铸造交易已提交，但原图未保存；链上缩略图不受影响", "info");
+        }
+      }
+      $("mint-name").value = "";
+      $("mint-photo").value = "";
+      updatePhotoButton();
+      $("mint-quantity").value = "1";
       $("mint-preview").hidden = true;
       $("mint-preview").removeAttribute("src");
       await refreshMe();
@@ -610,11 +692,23 @@
 
   async function listNft(tokenId, priceText) {
     try {
-      await submitTransaction("nft_list", { token_id: tokenId, price: parseCoins(priceText), fee: economyFee("nft") });
+      await submitTransaction("nft_list", {
+        token_id: tokenId, price: listingPrice(priceText, "一口价"), fee: economyFee("nft"),
+      });
       await refreshMe();
     } catch (problem) {
       notify(problem.message, "error");
     }
+  }
+
+  function listingPrice(text, label) {
+    const value = text.trim() || "1";
+    if (!/^\d+(\.\d{1,8})?$/.test(value)) {
+      throw new Error(`${label}请输入数字，最多 8 位小数，例如 1.5`);
+    }
+    const amount = parseCoins(value);
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error(`${label}须为有效的正数`);
+    return amount;
   }
 
   async function simpleNftAction(type, tokenId) {
@@ -630,7 +724,7 @@
     try {
       await submitTransaction("nft_auction_create", {
         token_id: tokenId,
-        reserve_price: parseCoins(priceText),
+        reserve_price: listingPrice(priceText, "起拍价"),
         duration: Number(durationText),
         fee: economyFee("auction"),
       });
@@ -644,7 +738,7 @@
     try {
       await submitTransaction("nft_bid", {
         auction_id: auctionId,
-        amount: parseCoins(priceText),
+        amount: parseCoins(priceText.trim() || formatCoins(state.tick.auctions.active.find(item => item.auction_id === auctionId).minimum_bid, 8)),
         fee: economyFee("auction"),
       });
       const input = $("auction-list").querySelector(`input[data-bid-price="${auctionId}"]`);
@@ -670,13 +764,21 @@
 
   function renderLive() {
     const chain = state.tick.chain;
-    $("chain-summary").textContent = `区块高度 ${chain.height} · 出块难度 ${chain.difficulty} 位 · 下一块奖励 ${formatCoins(chain.subsidy)} 币`;
+    const {count, bytes} = state.tick.mempool;
+    const size = bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KiB`
+      : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MiB` : `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+    $("chain-summary").textContent = `区块高度 ${chain.height} · 基准出块难度 ${chain.difficulty} 位 · 下一块奖励 ${formatCoins(chain.subsidy)} 币 · 内存池 ${count} 笔 / ${size}`;
+    $("stat-mempool").textContent = `${count} 笔`;
+    $("stat-mempool-bytes").textContent = size;
+    $("stat-mempool").parentElement.title = `内存池 ${count} 笔 / ${bytes.toLocaleString()} B`;
+    fitMiningStats();
     renderAnnouncement(state.tick.announcement);
     renderLeaderboard();
     renderPackets();
     renderNfts();
     renderAuctions();
     renderJob();
+    renderNodes();
   }
 
   function renderAnnouncement(announcement) {
@@ -695,16 +797,21 @@
       return;
     }
     const job = state.job;
+    const chain = state.tick?.chain;
+    const relaxed = chain && job.height === chain.height + 1 && job.difficulty < chain.difficulty;
     $("job-line").textContent =
-      `当前作业：第 ${job.height} 块 · 挖矿难度 ${job.difficulty} 位 · 交易 ${job.tx_count} 笔`;
+      `当前作业：第 ${job.height} 块 · 出块前导 ${job.difficulty} 位${relaxed ? `（等待较久，按规则从 ${chain.difficulty} 位临时放宽）` : ""} · 奖励 ${chain ? formatCoins(chain.subsidy) : "--"} 币 + 手续费`;
+    $("stat-share-bits").textContent = `${job.difficulty} 位`;
   }
 
   function renderMiningStats() {
     const mining = state.me ? state.me.mining : null;
     $("stat-hashrate").textContent = formatHashrate(state.localWallet ? mining?.hashrate : state.rate);
-    $("stat-work").textContent = (mining ? mining.stage_work : 0).toLocaleString();
+    const work = mining ? mining.stage_work : 0;
+    $("stat-work").textContent = compactWork(work);
+    $("stat-work").title = work.toLocaleString();
     $("stat-shares").textContent = mining ? mining.shares : 0;
-    $("stat-share-bits").textContent = mining ? `${mining.share_bits} 位` : "--";
+    $("stat-share-bits").textContent = state.job ? `${state.job.difficulty} 位` : "--";
     $("stat-blocks").textContent = mining ? mining.blocks_found : 0;
     const browserRow = $("browser-miner-row");
     const browserWorking = state.mining && !state.localWallet;
@@ -718,6 +825,16 @@
     $("native-miner-status").textContent = state.mining ? "工作中" : "未工作";
     if (window.SimMiningDriver) window.SimMiningDriver.render();
     $("reset-miner").hidden = true;
+    fitMiningStats();
+  }
+
+  function fitMiningStats() {
+    const stats = document.querySelector(".panel-mining .stats");
+    stats.classList.remove("stats-wide");
+    const values = stats.querySelectorAll(".stat:not([hidden]) strong, .stat:not([hidden]) small, .stat-label");
+    if ([...values].some(value => value.scrollWidth > value.clientWidth + 1)) {
+      stats.classList.add("stats-wide");
+    }
   }
 
   function renderWallet() {
@@ -771,10 +888,30 @@
 
   let renderedNftList = "";
 
+  function compactWork(value) {
+    if (value < 10000) return value.toLocaleString();
+    const units = ["", "k", "M", "G", "T", "P", "E"];
+    let index = Math.min(Math.floor(Math.log10(value) / 3), units.length - 1);
+    let scaled = Number((value / 1000 ** index).toPrecision(4));
+    if (scaled >= 1000 && index < units.length - 1) { index++; scaled /= 1000; }
+    return scaled.toPrecision(4) + units[index];
+  }
+
+  function nftIdentity(item, label) {
+    const id = item.token_id || "";
+    return `<div class="nft-identity"><span class="tag tag-blue">${escapeHtml(label)}</span>
+      <button type="button" class="contract-copy" data-copy-contract="${escapeHtml(id)}" title="${escapeHtml(id)}">${escapeHtml(id.slice(0, 12))}…</button>
+      ${item.mint_height != null ? `<span class="muted small">铸造：第 ${item.mint_height} 块</span>` : ""}</div>`;
+  }
+
+  function nftArt(item) {
+    return `<div class="nft-art">${thumbnailHtml(item)}<strong class="nft-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong></div>`;
+  }
+
   function thumbnailHtml(item) {
     if (!item.thumbnail_id || !/^[a-f0-9]{64}$/.test(item.thumbnail_id)) return "";
     const url = `/api/thumbnails/${item.thumbnail_id}`;
-    return `<a href="${url}" download="thumbnail.jpg" title="下载缩略图"><img src="${url}" alt="缩略图" width="56" loading="lazy"></a>`;
+    return `<button type="button" class="nft-picture" data-image="${item.thumbnail_id}" title="查看图片并下载"><img src="${url}" alt="${escapeHtml(item.name || "缩略图")}" width="64" loading="lazy"></button>`;
   }
 
   function renderNfts() {
@@ -786,10 +923,8 @@
     const rows = mine.map((nft) => {
       const auction = nft.auction_id ? auctions.find((item) => item.auction_id === nft.auction_id) : null;
       if (auction) {
-        return `<li class="row-item">
-          <span class="tag tag-gold">拍卖中</span>
-          <span class="grow">
-            ${thumbnailHtml(nft)}<strong>${escapeHtml(nft.name)}</strong>
+        return `<li class="row-item nft-row">
+          ${nftIdentity(nft, "拍卖中")}${nftArt(nft)}<span class="grow">
             <span class="muted small">当前价 ${formatCoins(auctionPrice(auction))} 币 · ${auction.bid_count} 次出价</span>
           </span>
           <span class="muted small">${
@@ -798,28 +933,20 @@
         </li>`;
       }
       if (nft.price !== null) {
-        return `<li class="row-item">
-          <span class="tag tag-blue">我的藏品</span>
-          <span class="grow">
-            ${thumbnailHtml(nft)}<strong>${escapeHtml(nft.name)}</strong>
+        return `<li class="row-item nft-row">
+          ${nftIdentity(nft, "我的藏品")}${nftArt(nft)}<span class="grow">
             <span class="muted small">在售 ${formatCoins(nft.price)} 币</span>
           </span>
           <button type="button" class="ghost" data-action="unlist" data-token="${nft.token_id}">下架</button>
         </li>`;
       }
-      return `<li class="row-item row-item-stack">
-        <div class="row-head">
-          <span class="tag tag-blue">我的藏品</span>
-          <span class="grow">
-            ${thumbnailHtml(nft)}<strong>${escapeHtml(nft.name)}</strong>
-            <span class="muted small">${nft.token_id.slice(0, 12)}… · 第 ${nft.mint_height} 块铸造</span>
-          </span>
-        </div>
-        <div class="row-actions">
-          <input class="price-input" type="text" inputmode="decimal" placeholder="一口价" data-price="${nft.token_id}">
-          <button type="button" class="ghost" data-action="list" data-token="${nft.token_id}">上架</button>
-          <input class="price-input" type="text" inputmode="decimal" placeholder="起拍价" data-reserve="${nft.token_id}">
-          <select class="duration-select" data-duration="${nft.token_id}">
+      return `<li class="row-item nft-row">
+        ${nftIdentity(nft, "我的藏品")}${nftArt(nft)}
+        <div class="nft-controls">
+          <label>一口价<input class="price-input" type="text" inputmode="decimal" placeholder="1" data-price="${nft.token_id}"></label>
+          <button type="button" class="primary" data-action="list" data-token="${nft.token_id}">上架</button>
+          <label>起拍价<input class="price-input" type="text" inputmode="decimal" placeholder="1" data-reserve="${nft.token_id}"></label>
+          <label>${state.transactionDomain ? "限时块数" : "限时"}<select class="duration-select" data-duration="${nft.token_id}">
             ${state.transactionDomain ? `<option value="2">2 块</option>
             <option value="4">4 块</option>
             <option value="10" selected>10 块</option>
@@ -827,8 +954,8 @@
             <option value="180">3 分钟</option>
             <option value="300" selected>5 分钟</option>
             <option value="600">10 分钟</option>`}
-          </select>
-          <button type="button" class="ghost" data-action="auction" data-token="${nft.token_id}">开拍</button>
+          </select></label>
+          <button type="button" class="primary" data-action="auction" data-token="${nft.token_id}">开拍</button>
         </div>
       </li>`;
     });
@@ -838,10 +965,8 @@
       const action = mineListing
         ? `<span class="muted small">我的挂单</span>`
         : `<button type="button" class="ghost" data-action="buy" data-token="${item.token_id}">买下</button>`;
-      return `<li class="row-item">
-        <span class="tag">在售</span>
-        <span class="grow">
-          ${thumbnailHtml(item)}<strong>${escapeHtml(item.name)}</strong>
+      return `<li class="row-item nft-row">
+        ${nftIdentity(item, "在售")}${nftArt(item)}<span class="grow">
           <span class="muted small">卖家 ${escapeHtml(item.seller_name)} · ${formatCoins(item.price)} 币</span>
         </span>
         ${action}
@@ -853,8 +978,16 @@
       `<li class="empty">还没有藏品，先铸造一件属于自己的纪念品</li>`;
     /* 每秒重建列表会清掉学生正在输入的价格，内容没变就不碰 DOM。 */
     if (html !== renderedNftList) {
+      const list = $("nft-list");
+      const selector = "input[data-price], input[data-reserve], select[data-duration]";
+      const fieldKey = (field) => field.dataset.price ? `price:${field.dataset.price}`
+        : field.dataset.reserve ? `reserve:${field.dataset.reserve}` : `duration:${field.dataset.duration}`;
+      const drafts = new Map(Array.from(list.querySelectorAll(selector), (field) => [fieldKey(field), field.value]));
       renderedNftList = html;
-      $("nft-list").innerHTML = html;
+      list.innerHTML = html;
+      for (const field of list.querySelectorAll(selector)) {
+        if (drafts.has(fieldKey(field))) field.value = drafts.get(fieldKey(field));
+      }
     }
   }
 
@@ -920,7 +1053,7 @@
     const leading = auction.highest_bidder === state.address;
     const ended = !auction.ends_height && auction.seconds_left <= 0;
     let action = `<input class="price-input" type="text" inputmode="decimal"
-        data-bid-price="${auction.auction_id}" placeholder="${formatCoins(auction.minimum_bid)}">
+        data-bid-price="${auction.auction_id}" placeholder="${formatCoins(auction.minimum_bid, 8)}">
       <button type="button" class="ghost" data-action="bid" data-auction="${auction.auction_id}">出价</button>`;
     if (mine) {
       action =
@@ -942,20 +1075,14 @@
       !mine && !leading && auction.seconds_left > 0 && auction.seconds_left <= 15
         ? `<span class="muted small">最后 15 秒，出价可能赶不上打包</span>`
         : "";
-    return `<div class="row-head">
-        <span class="tag tag-gold">拍卖</span>
-        <span class="grow">
-          ${thumbnailHtml(auction)}<strong>${escapeHtml(auction.name)}</strong>
+    return `<div class="nft-row">
+        ${nftIdentity(auction, "拍卖")}${nftArt(auction)}<div class="auction-info">
           <span class="muted small">卖家 ${escapeHtml(auction.seller_name)} · 当前价 ${formatCoins(auctionPrice(auction))} 币 · ${
             auction.bid_count
           } 次出价</span>
-        </span>
         <span class="auction-timer muted small"></span>
-      </div>
-      <div class="row-actions">
-        <span class="muted small">最低出价 ${formatCoins(auction.minimum_bid)} 币</span>
-        ${rush}
-        ${action}
+        <span class="muted small">最低出价 ${formatCoins(auction.minimum_bid, 8)} 币</span>
+        ${rush}<div class="auction-actions">${action}</div></div>
       </div>`;
   }
 
@@ -994,16 +1121,62 @@
       </li>`,
     );
     $("block-list").innerHTML = rows.join("") || `<li class="empty">链上还没有区块</li>`;
+    $("load-more-blocks").hidden = !state.blocks.length || state.blocks.at(-1).height === 0;
+  }
+
+  function renderNodes() {
+    const nodes = state.tick?.nodes;
+    const browsers = nodes?.browsers || [];
+    $("node-status").textContent = `独立节点连接 ${nodes?.connected ?? 0} 个 · 本节点连接的浏览器钱包 ${browsers.length} 个 · 区块高度 ${state.tick?.chain.height ?? "--"}`;
+    const ownBrowser = !state.localWallet && state.address;
+    const participants = [...browsers];
+    if (ownBrowser && !participants.some(row => row.address === state.address)) {
+      participants.unshift({address: state.address, nickname: state.nickname, source_origins: [location.origin]});
+    }
+    $("node-participants").innerHTML = `<li class="row-item node-participant"><strong>提供网页与 JS 的独立节点${nodes?.node_name ? `：${escapeHtml(nodes.node_name)}` : ""}</strong><span class="mono">${escapeHtml(location.origin)}</span></li>`
+      + participants.map(row => `<li class="row-item node-participant"><strong>浏览器端${row.address === ownBrowser ? "（本页）" : ""}：${escapeHtml(row.nickname || shortAddress(row.address))}</strong>
+          <span class="mono" title="${escapeHtml(row.address)}">${escapeHtml(shortAddress(row.address))}</span>
+          <span class="muted small">网页与 JS 来源：${escapeHtml((row.source_origins?.length ? row.source_origins : [row.address === ownBrowser ? location.origin : "当前节点（访问地址未上报）"]).join("、"))}</span></li>`).join("");
+    if (!nodes) return;
+    $("node-log").innerHTML = [...nodes.events].reverse().map(item =>
+      `<li><time class="muted small">${formatTime(item.at)}</time><span>${escapeHtml(item.message)}</span></li>`).join("") || '<li>暂时没有节点连接记录</li>';
+  }
+
+  function updatePhotoButton() {
+    const selected = $("mint-photo").files.length > 0;
+    $("photo-toggle").textContent = selected ? "−" : "+";
+    $("photo-toggle").title = selected ? "删除照片" : "上传照片";
+    $("photo-toggle").setAttribute("aria-label", $("photo-toggle").title);
+  }
+
+  async function copyText(text, success) {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else throw new Error("clipboard unavailable");
+    } catch {
+      const input = document.createElement("textarea");
+      input.value = text;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      if (!copied) { notify(`复制失败，请手动复制：${text}`, "info"); return; }
+    }
+    notify(success, "success");
   }
 
   function pushLog(message, kind) {
-    state.log.unshift({ message, kind: kind || "info", at: new Date() });
+    const category = kind === "error" ? "提示" : kind === "block" || message.startsWith("区块") ? "出块"
+      : message.includes("交易") ? "交易" : message.includes("作业") ? "作业" : "算力";
+    state.log.unshift({ message, category, kind: kind || "info", at: new Date() });
     state.log = state.log.slice(0, LOG_LIMIT);
     $("share-log").innerHTML = state.log
       .map(
         (item) => `<li class="log-${item.kind}">
-          <span class="muted small">${item.at.toLocaleTimeString("zh-CN", { hour12: false })}</span>
-          ${escapeHtml(item.message)}
+          <time class="muted small">${item.at.toLocaleTimeString("zh-CN", { hour12: false })}</time>
+          <span class="log-category">${item.category}</span><span class="log-message">${escapeHtml(item.message)}</span>
         </li>`,
       )
       .join("");
@@ -1050,6 +1223,41 @@
   }
 
   function bindEvents() {
+    new ResizeObserver(fitMiningStats).observe(document.querySelector(".panel-mining .stats"));
+    document.fonts.ready.then(fitMiningStats);
+    $("load-more-blocks").addEventListener("click", () => loadRecentBlocks(true));
+    $("close-image").addEventListener("click", () => $("image-viewer").close());
+    document.addEventListener("click", async event => {
+      const contract = event.target.closest("[data-copy-contract]");
+      if (contract) await copyText(contract.dataset.copyContract, "合约地址复制成功");
+      const picture = event.target.closest("[data-image]");
+      if (!picture) return;
+      const dialog = $("image-viewer");
+      const id = picture.dataset.image;
+      let url = `/api/thumbnails/${id}`;
+      let original = false;
+      let extension = "jpg";
+      try {
+        const response = await fetch(`/api/originals/${id}`, {method: "HEAD"});
+        if (response.ok) {
+          url = `/api/originals/${id}`;
+          original = true;
+          extension = {"image/png":"png", "image/gif":"gif", "image/webp":"webp"}[response.headers.get("Content-Type")] || "jpg";
+        }
+      } catch { /* The on-chain thumbnail remains available. */ }
+      $("full-image").src = url;
+      $("download-image").href = url;
+      $("download-image").download = `collectible.${extension}`;
+      $("image-caption").textContent = original ? "原图" : "此节点没有原图，显示链上缩略图";
+      if (!dialog.open) dialog.showModal();
+    });
+    $("photo-toggle").addEventListener("click", () => {
+      if (!$("mint-photo").files.length) { $("mint-photo").click(); return; }
+      $("mint-photo").value = "";
+      $("mint-preview").hidden = true;
+      $("mint-preview").removeAttribute("src");
+      updatePhotoButton();
+    });
     $("peer-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -1115,6 +1323,7 @@
     $("packet-form").addEventListener("submit", handlePacketCreate);
     $("mint-form").addEventListener("submit", handleMint);
     $("mint-photo").addEventListener("change", async (event) => {
+      updatePhotoButton();
       const file = event.target.files[0];
       const preview = $("mint-preview");
       preview.hidden = true;

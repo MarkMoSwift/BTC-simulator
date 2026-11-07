@@ -33,6 +33,17 @@ class Peers:
         self.tasks: list[asyncio.Task] = []
         self.connections: set[asyncio.Queue] = set()
         self.synced = asyncio.Event()
+        self.events: list[dict[str, Any]] = []
+        self.event_sequence = 0
+
+    def log(self, message: str) -> None:
+        self.event_sequence += 1
+        self.events.append({"id": self.event_sequence, "at": int(time.time()), "message": message[:240]})
+        self.events = self.events[-100:]
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"connected": len(self.connections), "configured": len(self.addresses),
+                "height": self.chain.height, "events": self.events.copy()}
 
     def start(self) -> None:
         self.tasks = [asyncio.create_task(self.dial(address)) for address in self.addresses]
@@ -63,10 +74,11 @@ class Peers:
                                url.path + PATH, "", ""))
         while True:
             try:
+                self.log(f"正在连接 {address}")
                 async with connect(endpoint, open_timeout=4, max_size=MAX_MESSAGE) as socket:
-                    await self.exchange(socket.send, socket.recv)
-            except (OSError, TimeoutError, WebSocketException, ValueError, KeyError, TypeError):
-                pass
+                    await self.exchange(socket.send, socket.recv, address)
+            except (OSError, TimeoutError, WebSocketException, ValueError, KeyError, TypeError) as exc:
+                self.log(f"连接中断或失败 {address}（{type(exc).__name__}），稍后重试")
             await asyncio.sleep(3)
 
     def locator(self) -> list[str]:
@@ -77,7 +89,8 @@ class Peers:
             step *= 2
         return [self.chain.hashes[height] for height in heights]
 
-    async def exchange(self, send: Callable[[str], Awaitable], receive: Callable[[], Awaitable]) -> None:
+    async def exchange(self, send: Callable[[str], Awaitable], receive: Callable[[], Awaitable],
+                       label: str = "接入节点") -> None:
         session = self.chain.session
         if session is None or len(self.connections) >= 16:
             return
@@ -103,9 +116,11 @@ class Peers:
 
         await write(hello)
         if await asyncio.wait_for(read(), 5) != hello:
+            self.log(f"拒绝连接 {label}：协议或课堂邀请不一致")
             return
         queue: asyncio.Queue = asyncio.Queue(maxsize=32)
         self.connections.add(queue)
+        self.log(f"连接成功 {label}：课堂与协议校验通过")
 
         async def sender() -> None:
             await write({"type": "tip", "hash": self.chain.tip_hash})
@@ -122,16 +137,21 @@ class Peers:
             branch_bytes = 0
             requested = False
             requested_pending = False
+            synced_tip = ""
             while True:
                 message = await read()
                 kind = message.get("type")
                 if kind == "tip" and not requested:
                     if message.get("hash") == self.chain.tip_hash:
                         self.synced.set()
+                        if synced_tip != self.chain.tip_hash:
+                            synced_tip = self.chain.tip_hash
+                            self.log(f"{label} 区块同步完成：链头一致，高度 {self.chain.height}")
                         if not requested_pending:
                             await write({"type": "pending"})
                             requested_pending = True
                     else:
+                        self.log(f"{label} 链头不同，正在请求同步区块")
                         await write({"type": "get", "locator": self.locator()})
                         requested = True
                 elif kind == "get":
@@ -161,6 +181,8 @@ class Peers:
                     if not blocks:
                         ancestor = common
                     blocks.extend(page)
+                    if page:
+                        self.log(f"从 {label} 收到 {len(page)} 个区块，累计 {len(blocks)} 个，正在校验")
                     branch_bytes += len(json.dumps(page))
                     if branch_bytes > MAX_BRANCH_BYTES:
                         raise ValueError("候选链过大")
@@ -172,10 +194,13 @@ class Peers:
                     try:
                         if self.chain.adopt_branch(ancestor, blocks, now=int(time.time())):
                             self.on_chain()
+                            self.log(f"同步成功 {label}：当前区块高度 {self.chain.height}")
+                        else:
+                            self.log(f"{label} 区块校验结束，保留当前链，高度 {self.chain.height}")
                     except FutureBlock as exc:
                         await asyncio.sleep(min(max(exc.retry_at - time.time(), 0), 5))
                     except (BlockError, RuleError, TxError):
-                        pass
+                        self.log(f"拒绝 {label} 的候选链：区块或交易校验失败")
                     else:
                         self.synced.set()
                         await write({"type": "pending"})
@@ -199,6 +224,7 @@ class Peers:
                 task.result()
         finally:
             self.connections.discard(queue)
+            self.log(f"连接已断开 {label}")
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

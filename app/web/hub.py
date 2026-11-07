@@ -12,6 +12,7 @@ from fastapi import WebSocket
 class ConnectionHub:
     def __init__(self) -> None:
         self.connections: set[WebSocket] = set()
+        self.identities: dict[WebSocket, dict[str, Any]] = {}
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
         self._task: asyncio.Task[None] | None = None
 
@@ -25,11 +26,28 @@ class ConnectionHub:
             with contextlib.suppress(asyncio.QueueFull):
                 self.queue.put_nowait(event)
 
-    async def register(self, socket: WebSocket) -> None:
+    async def register(self, socket: WebSocket, identity: dict[str, Any] | None = None) -> None:
         self.connections.add(socket)
+        if identity is not None:
+            self.identities[socket] = identity.copy()
 
     def unregister(self, socket: WebSocket) -> None:
         self.connections.discard(socket)
+        self.identities.pop(socket, None)
+
+    def browser_participants(self) -> list[dict[str, Any]]:
+        wallets: dict[str, dict[str, Any]] = {}
+        for socket, identity in self.identities.items():
+            if socket not in self.connections or identity.get("kind") != "browser":
+                continue
+            address = identity["address"]
+            row = wallets.setdefault(address, {"address": address, "nickname": identity["nickname"],
+                                               "connections": 0, "source_origins": []})
+            row["connections"] += 1
+            origin = identity.get("source_origin")
+            if origin and origin not in row["source_origins"]:
+                row["source_origins"].append(origin)
+        return sorted(wallets.values(), key=lambda row: (row["nickname"], row["address"]))
 
     async def start(self) -> None:
         if self._task is None:
@@ -45,6 +63,7 @@ class ConnectionHub:
             with contextlib.suppress(Exception):
                 await socket.close()
         self.connections.clear()
+        self.identities.clear()
 
     async def _run(self) -> None:
         while True:

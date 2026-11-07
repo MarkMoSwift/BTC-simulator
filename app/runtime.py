@@ -136,6 +136,7 @@ class ClassroomService:
         player = self._local_player()
         token = secrets.token_urlsafe(24)
         self.sessions[token] = {"nickname": player["nickname"], "role": "student",
+                                "client_kind": "native",
                                 "expires_at": float("inf") if internal else time.time() + SESSION_SECONDS}
         return {"token": token, "player": self.player_view_by_record(player)}
 
@@ -350,6 +351,8 @@ class ClassroomService:
         tick = {
             "chain": self.chain.snapshot(),
             "mempool": self.mempool.stats(),
+            "nodes": {**self.peers.snapshot(), "node_name": self.settings.node_name,
+                      "browsers": self.hub.browser_participants()},
             "packets": self.packets_view(now),
             "market": self.market_view()["listings"],
             "auctions": self.auctions_view(now),
@@ -505,6 +508,7 @@ class ClassroomService:
             "auction_id": auction["auction_id"],
             "token_id": auction["token_id"],
             "name": nft["name"] if nft else "未知藏品",
+            "mint_height": nft["mint_height"] if nft else None,
             "thumbnail_id": nft.get("thumbnail_id") if nft else None,
             "seller": auction["seller"],
             "seller_name": names.get(auction["seller"], "未知"),

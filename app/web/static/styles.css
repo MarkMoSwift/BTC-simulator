@@ -372,6 +372,7 @@ code,
 
 .panel-mining {
   border-top: 3px solid var(--accent);
+  container-type: inline-size;
 }
 
 .panel-head {
@@ -497,7 +498,7 @@ code,
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
 }
 
@@ -517,6 +518,7 @@ code,
 }
 
 .stat strong {
+  white-space: nowrap;
   font-size: var(--text-stat);
   font-weight: 600;
   letter-spacing: -0.02em;
@@ -1032,9 +1034,8 @@ a.ghost {
 /* ---------- 响应式 ---------- */
 
 .panel-economy {
-  align-self: start;
-  max-height: 36rem;
-  overflow-y: auto;
+  align-self: stretch;
+  overflow: visible;
 }
 
 .economy-fee {
@@ -1047,6 +1048,47 @@ a.ghost {
 .economy-fee input {
   width: 7rem;
   min-width: 0;
+}
+
+.mint-fields {
+  display: grid;
+  grid-template-columns: minmax(100px, 2fr) 44px 65px 85px auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.mint-fields > label,
+.mint-fields input {
+  min-width: 0;
+  width: 100%;
+}
+
+.mint-fields > button { align-self: end; }
+.mint-fields > label { display: grid; grid-template-rows: 20px 40px; gap: 5px; }
+
+.auction-heading {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#nft-list {
+  min-height: 3rem;
+}
+
+#auction-list {
+  min-height: 3rem;
+}
+
+#auction-list:has([data-auction]) {
+  min-height: 10rem;
+}
+
+.auction-heading .subhead,
+.auction-heading .economy-fee {
+  margin: 0;
 }
 
 .miner-list {
@@ -1184,6 +1226,53 @@ a.ghost {
     opacity: 1;
     transform: none;
   }
+}
+
+.node-companion { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.panel-mining .stats { grid-template-columns: repeat(5,minmax(0,1fr)); }
+.panel-mining .stats.stats-wide { grid-template-columns: repeat(2,minmax(0,1.4fr)) repeat(3,minmax(0,.8fr)); }
+.panel-mining .stat { min-width: 0; padding-inline: 6px; }
+.panel-mining .stat strong { font-size: clamp(.75rem,3.1cqw,1.375rem); }
+.stat-mempool small { color: var(--ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat-mempool .stat-label { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; white-space: nowrap; }
+.stat-mempool small { font-size: .6875rem; }
+.packet-feed { position: relative; flex: 1; min-height: 140px; }
+#packet-list { position: absolute; inset: 0; max-height: none; }
+#packet-list > li { flex-shrink: 0; }
+#packet-list > .empty { display: flex; flex: 1; align-items: center; justify-content: center; background: var(--surface-2); border-radius: var(--radius-inner); }
+.mining-log { position: relative; flex: 1; min-height: 200px; }
+#share-log { position: absolute; inset: 0; max-height: none; }
+#share-log li { display: grid; grid-template-columns: 8ch 3em minmax(0,1fr); align-items: start; }
+#share-log time { white-space: nowrap; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+#share-log .log-message { min-width: 0; overflow-wrap: anywhere; }
+#share-log .log-category { color: var(--ink-faint); white-space: nowrap; }
+.panel-nodes { align-self: stretch; min-height: 28rem; }
+#node-log { max-height: 36rem; }
+#node-log li { overflow-wrap: anywhere; }
+.node-participant { flex-direction: column; align-items: flex-start; gap: 4px; overflow-wrap: anywhere; }
+.node-participants { max-height: 24rem; flex-shrink: 0; }
+#nft-list, #auction-list { flex-shrink: 0; max-height: 20rem; }
+.photo-toggle { border-radius: 50%; width: 40px; height: 40px; border: 1px solid var(--accent); background: var(--accent-soft); font-size: 1.6rem; cursor: pointer; }
+.nft-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.nft-identity { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 100px; }
+.contract-copy { padding: 0; border: 0; background: transparent; text-decoration: underline dashed; text-underline-offset: 4px; cursor: pointer; font-family: var(--font-mono); }
+.nft-art { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 80px; min-width: 0; flex: none; }
+.nft-name { display: block; text-align: center; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nft-picture { padding: 0; border: 0; background: transparent; cursor: zoom-in; align-self: center; }
+.nft-picture img { display: block; width: 64px; height: 64px; object-fit: contain; }
+.nft-controls { display: flex; flex: 1 1 240px; min-width: 0; flex-wrap: wrap; gap: 8px; align-items: end; margin-left: auto; }
+.nft-controls label { display: flex; flex-direction: column; gap: 5px; }
+.nft-controls input, .nft-controls select { border: 1px solid var(--line); background: var(--surface); width: 80px; }
+.nft-controls button { min-height: 40px; }
+.auction-info { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 140px; }
+.auction-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#image-viewer { border: 1px solid var(--line); border-radius: 12px; max-width: 92vw; max-height: 92vh; background: var(--surface); color: var(--ink); }
+#image-viewer::backdrop { background: #0009; }
+#full-image { display: block; max-width: 82vw; max-height: 70vh; object-fit: contain; margin: 12px auto; }
+@media(max-width: 640px) {
+  .panel-mining .stats, .panel-mining .stats.stats-wide { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .mint-fields { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .nft-controls { margin-left: 0; }
 }
 
 /* ---------- 投影大屏 ---------- */

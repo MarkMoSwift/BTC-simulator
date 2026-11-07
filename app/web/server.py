@@ -1,10 +1,14 @@
 """HTTP 与 WebSocket 接口。"""
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -146,14 +150,80 @@ def create_app(service: ClassroomService) -> FastAPI:
         return FileResponse(STATIC_DIR / "bigscreen.html")
 
     # ---------- 公共信息 ----------
+    def original_path(image_id: str) -> Path:
+        if not re.fullmatch(r"[a-f0-9]{64}", image_id):
+            raise HTTPException(status_code=404)
+        return service.store.db_path.parent / "originals" / image_id
+
+    def image_type(data: bytes) -> str:
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return "image/gif"
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            return "image/webp"
+        raise HTTPException(status_code=400, detail="原图支持 JPEG、PNG、GIF 或 WebP")
+
+    @app.post("/api/originals/{image_id}")
+    async def upload_original(image_id: str, request: Request,
+                              token: str = Depends(student_token)) -> dict[str, bool]:
+        player = service.student(token)
+        path = original_path(image_id)
+        # Attach only to an accepted mint belonging to this wallet.
+        pending = list(service.mempool.transactions.values())
+        heights = {nft["mint_height"] for nft in service.chain.state.nfts.values()
+                   if nft.get("thumbnail_id") == image_id}
+        for height in heights:
+            detail = service.store.block_detail(height)
+            if detail:
+                pending.extend(detail["transactions"])
+        allowed = False
+        for tx in pending:
+            if tx.get("type") != "nft_mint" or tx.get("sender") != player["address"]:
+                continue
+            raw = base64.b64decode(tx.get("thumbnail", ""))
+            digest = hashlib.sha256(hashlib.sha256(raw).digest()).hexdigest()
+            if digest == image_id:
+                allowed = True
+                break
+        if not allowed:
+            raise HTTPException(status_code=400, detail="需要先提交当前钱包的照片铸造交易")
+        chunks = bytearray()
+        async for chunk in request.stream():
+            chunks.extend(chunk)
+            if len(chunks) > 8 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="原图不能超过 8 MiB")
+        image_type(chunks)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(chunks)
+        return {"saved": True}
+
+    @app.api_route("/api/originals/{image_id}", methods=["GET", "HEAD"])
+    async def original(image_id: str) -> Response:
+        path = original_path(image_id)
+        if not path.is_file():
+            raise HTTPException(status_code=404)
+        with path.open("rb") as source:
+            mime = image_type(source.read(16))
+        return FileResponse(path, media_type=mime,
+                            headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
+
     @app.get("/api/public")
     async def public_state() -> dict[str, Any]:
         return {**service.public_state(), **{k: v for k, v in service.live_tick().items() if k != "chain"}}
 
     @app.get("/api/blocks")
-    async def blocks(limit: int = 20, offset: int = 0) -> dict[str, Any]:
+    async def blocks(limit: int = 20, offset: int = 0, before: int | None = None,
+                     tip: str | None = None) -> dict[str, Any]:
         limit = min(max(limit, 1), 100)
         offset = max(offset, 0)
+        if tip is not None and tip not in service.chain.hashes:
+            return {"blocks": [], "height": service.chain.height, "stale": True}
+        if before is not None:
+            offset = max(service.chain.height - before + 1, 0)
         return {
             "blocks": service.store.list_blocks_descending(limit=limit, offset=offset),
             "height": service.chain.height,
@@ -353,13 +423,28 @@ def create_app(service: ClassroomService) -> FastAPI:
     @app.websocket("/ws")
     async def websocket_events(socket: WebSocket, token: str | None = Query(default=None)) -> None:
         await socket.accept()
-        await service.hub.register(socket)
+        identity = None
         try:
-            role = service.session(token)["role"]
+            session = service.session(token)
+            role = session["role"]
+            if role == "student" and session.get("client_kind") != "native":
+                player = service.student(token)
+                origin = ""
+                try:
+                    source = urlsplit(socket.headers.get("origin", ""))
+                    if (source.scheme in {"http", "https"} and source.hostname
+                            and source.username is None and source.password is None
+                            and source.path in {"", "/"} and not source.query and not source.fragment):
+                        origin = f"{source.scheme}://{source.netloc}"
+                except ValueError:
+                    pass
+                identity = {"kind": "browser", "nickname": player["nickname"],
+                            "address": player["address"], "source_origin": origin}
         except ClassroomError:
             role = "guest"
-        await socket.send_json({"type": "hello", "data": {"role": role, **service.live_tick()}})
+        await service.hub.register(socket, identity)
         try:
+            await socket.send_json({"type": "hello", "data": {"role": role, **service.live_tick()}})
             while True:
                 await socket.receive_text()
         except WebSocketDisconnect:
